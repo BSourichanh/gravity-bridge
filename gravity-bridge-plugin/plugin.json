@@ -1,0 +1,17 @@
+{
+  "name": "gravity-bridge",
+  "displayName": "Gravity Bridge",
+  "version": "0.1.0",
+  "description": "Boîte aux lettres SQLite inter-workspaces et ouverture de conversations Antigravity App via sidecars agentapi (100 % stdlib Python).",
+  "logo": "assets/logo.svg",
+  "homepage": "https://github.com/BSourichanh/gravity-bridge",
+  "repository": "https://github.com/BSourichanh/gravity-bridge.git",
+  "suggestedPrompts": [
+    "/gravity-bridge",
+    "/gravity-bridge workspaces",
+    "/gravity-bridge status"
+  ],
+  "author": {
+    "name": "Gravity Contributors"
+  }
+}

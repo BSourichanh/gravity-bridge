@@ -1,0 +1,14 @@
+# Changelog
+
+Toutes les modifications notables de **Gravity Bridge** sont documentées dans ce fichier.
+Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce projet adhère au [Versioning Sémantique](https://semver.org/lang/fr/).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-11-22
+
+### Added
+- **Socle SQLite WAL & Sécurité (`core/store.py`, `core/security.py`) :** schéma 4 tables (`workspaces`, `threads`, `messages`, `jobs`) avec heartbeat sidecar (`sidecar_id`, `sidecar_pid`, `sidecar_last_seen_at`, `project_id`), migration idempotente depuis le schéma CLI initial, index unique partiel anti-jobs concurrents, normalisation Windows des chemins canoniques, détection/caviardage des secrets (AWS, Google, GitHub, `sk-...`, PEM, Bearer), plafonds UTF-8 (32 Ko), anti-boucle (`caller_conversation_id`, `GRAVITY_BRIDGE_DEPTH`) et réconciliation des jobs `queued`/`claimed` orphelins.
+- **Gestionnaire & Relais Sidecar `agentapi` (`core/sidecar_manager.py`, `scripts/sidecar_relay.py`) :** génération de micro-sidecars dédiés par projet (`~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`), création/réutilisation d'un projet sidecar dédié `<nom> (Bridge)` dans `~/.gemini/config/projects/*.json` (miroir de `projectResources`, `settings` et `permissionGrants` du projet utilisateur sans jamais lier ni masquer le projet utilisateur lorsqu'il est vide), réparation automatique des projets utilisateur pollués par `"sidecar"`, activation atomique dans `config.json` avec `"schemaVersion": 1`, boucle heartbeat + verrouillage atomique SQLite, création et poursuite de vraies conversations dans **Antigravity App** via `agentapi new-conversation` et `agentapi send-message` (avec résolution directe sous Windows hors `cmd.exe`, repli sur `new-conversation` si conversation absente et logs bornés caviardés à 256 Ko).
+- **Serveur MCP & Skill (`mcp/server.py`, `mcp_config.json`, `skills/gravity-bridge/SKILL.md`, `rules/AGENTS.md`) :** 9 outils JSON-RPC 2.0 stdio (`register_workspace`, `link_workspace`, `list_workspaces`, `send_message`, `list_inbox`, `read_thread`, `reply_thread`, `dispatch_thread`, `manage_thread`), fail-fast si sidecar cible hors ligne/non lié, auto-complétion des jobs `dispatched` sur `reply_thread` et protocole de feu vert humain unique, sans aucun hook permanent.
+- **Packaging, Installeur & Validateur (`plugin.json`, `assets/logo.svg`, `install.py`, `scripts/validate.py`) :** manifeste officiel 9 champs, installeur cross-platform avec `--link`/`--unlink`/`--project-id` et adaptation `python3` sur la copie cible, validateur `--strict` avec dry-run MCP et suite complète de tests unitaires `unittest`.
