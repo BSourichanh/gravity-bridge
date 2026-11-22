@@ -20,7 +20,7 @@ from core.security import (  # noqa: E402
     SecretDetectedError,
     ValidationError,
     assert_dispatch_allowed,
-    assert_mode_approval,
+    assert_dispatch_approved,
     assert_no_secrets,
     derive_slug_candidates,
     detect_secret_rule,
@@ -28,17 +28,17 @@ from core.security import (  # noqa: E402
     is_explicit_workspace_path,
     normalize_workspace_path,
     redact_secrets,
-    resolve_effective_mode,
     slugify_name,
     truncate_utf8_bytes,
     validate_body,
-    validate_effort,
+    validate_conversation_id,
     validate_file_refs,
-    validate_mode,
+    validate_job_action,
+    validate_model,
     validate_msg_type,
+    validate_sidecar_id,
     validate_slug,
     validate_subject,
-    validate_timeout_seconds,
     validate_wait_seconds,
 )
 
@@ -64,7 +64,6 @@ class TestSecretDetectionAndRedaction(unittest.TestCase):
                     assert_no_secrets(text, field_name="body")
                 self.assertEqual(ctx.exception.rule_name, expected_rule)
                 self.assertIn(expected_rule, str(ctx.exception))
-                # La valeur secrète elle-même ne doit jamais fuiter dans le message d'erreur.
                 token_part = text.split("=", 1)[-1].split("\n", 1)[0]
                 if "Bearer " in text:
                     token_part = text.split("Bearer ", 1)[1]
@@ -119,7 +118,6 @@ class TestLimitsAndFieldValidation(unittest.TestCase):
             validate_subject("Cle " + "AKIA" + "1234567890ABCDEF")
 
     def test_body_utf8_byte_limit_and_null_byte(self) -> None:
-        # "é" occupe 2 octets UTF-8 : 16_384 * 2 == 32_768 octets.
         exact_utf8 = "é" * (MAX_BODY_BYTES // 2)
         self.assertEqual(len(exact_utf8.encode("utf-8")), MAX_BODY_BYTES)
         self.assertEqual(validate_body(exact_utf8), exact_utf8)
@@ -133,7 +131,7 @@ class TestLimitsAndFieldValidation(unittest.TestCase):
             validate_body("hello\x00world")
 
     def test_truncate_utf8_bytes_respects_codepoint_boundaries(self) -> None:
-        text = "🚀" * 10  # 40 octets
+        text = "🚀" * 10
         truncated, was_truncated = truncate_utf8_bytes(text, 15, suffix="...")
         self.assertTrue(was_truncated)
         encoded = truncated.encode("utf-8")
@@ -175,7 +173,7 @@ class TestPathsSlugsAndPolicy(unittest.TestCase):
         self.assertFalse(is_explicit_workspace_path("relative/path"))
         self.assertTrue(is_explicit_workspace_path("~/projets/app"))
         self.assertTrue(is_explicit_workspace_path("/tmp/proj"))
-        self.assertTrue(is_explicit_workspace_path("D:\\Neko\\GitHub\\app"))
+        self.assertTrue(is_explicit_workspace_path("D:\\Work\\GitHub\\app"))
         self.assertTrue(is_explicit_workspace_path("C:/Users/app"))
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,7 +183,6 @@ class TestPathsSlugsAndPolicy(unittest.TestCase):
             self.assertTrue(Path(norm).is_dir())
             if len(norm) >= 2 and norm[1] == ":":
                 self.assertTrue(norm[0].isupper())
-                # Même avec lecteur minuscule, la normalisation retourne le même chemin canonique.
                 lower_drive = norm[0].lower() + norm[1:]
                 self.assertEqual(normalize_workspace_path(lower_drive), norm)
 
@@ -196,11 +193,16 @@ class TestPathsSlugsAndPolicy(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 normalize_workspace_path(str(Path(tmp) / "missing_dir"))
 
-    def test_slug_validation_and_derivation(self) -> None:
+    def test_slug_sidecar_id_and_derivation(self) -> None:
         self.assertEqual(validate_slug("gravity-bridge_01"), "gravity-bridge_01")
         for bad in ("", "-bad", "_bad", "Upper", "a" * 50, "a b"):
             with self.assertRaises(ValidationError):
                 validate_slug(bad)
+
+        long_sidecar = "gravity-bridge-" + ("a" * 49)
+        self.assertEqual(validate_sidecar_id(long_sidecar), long_sidecar)
+        with self.assertRaises(ValidationError):
+            validate_sidecar_id("gravity-bridge-" + ("a" * 70))
 
         self.assertEqual(slugify_name("Mon Atelier Étoile!"), "mon-atelier-etoile")
         self.assertEqual(slugify_name("___"), "workspace")
@@ -208,7 +210,7 @@ class TestPathsSlugsAndPolicy(unittest.TestCase):
         self.assertEqual(base, "gravity-bridge")
         self.assertEqual(parent, "github-gravity-bridge")
 
-    def test_depth_guard_fail_closed(self) -> None:
+    def test_depth_guard_and_caller_conversation_id_anti_loop(self) -> None:
         self.assertEqual(get_bridge_depth({}), 0)
         self.assertEqual(get_bridge_depth({"GRAVITY_BRIDGE_DEPTH": ""}), 0)
         self.assertEqual(assert_dispatch_allowed({"GRAVITY_BRIDGE_DEPTH": "0"}), 0)
@@ -218,37 +220,55 @@ class TestPathsSlugsAndPolicy(unittest.TestCase):
                 with self.assertRaises(DispatchBlockedError):
                     assert_dispatch_allowed({"GRAVITY_BRIDGE_DEPTH": blocked})
 
-    def test_modes_approval_effort_and_numeric_bounds(self) -> None:
-        self.assertEqual(resolve_effective_mode("question"), "plan")
-        self.assertEqual(resolve_effective_mode("info"), "plan")
-        self.assertEqual(resolve_effective_mode("handoff"), "accept-edits")
-        self.assertEqual(resolve_effective_mode("handoff", "plan"), "plan")
+        target_uuid = "51832851-9d83-41d4-857d-3c2c2f07f016"
+        self.assertEqual(
+            assert_dispatch_allowed(
+                {},
+                caller_conversation_id="11111111-1111-4111-8111-111111111111",
+                known_target_conversation_ids=[target_uuid],
+            ),
+            0,
+        )
+        with self.assertRaises(DispatchBlockedError):
+            assert_dispatch_allowed(
+                {},
+                caller_conversation_id=target_uuid.upper(),
+                known_target_conversation_ids=[target_uuid],
+            )
+
+    def test_job_action_conversation_id_model_approval_and_wait_bounds(self) -> None:
+        self.assertEqual(validate_job_action("new_conversation"), "new_conversation")
+        self.assertEqual(validate_job_action("send_message"), "send_message")
+        with self.assertRaises(ValidationError):
+            validate_job_action("cli_worker")
+
         self.assertEqual(validate_msg_type("reply", allow_reply=True), "reply")
         with self.assertRaises(ValidationError):
             validate_msg_type("reply", allow_reply=False)
-        with self.assertRaises(ValidationError):
-            validate_mode("danger")
 
-        assert_mode_approval("plan", False)
-        assert_mode_approval("accept-edits", True)
-        with self.assertRaises(DispatchBlockedError):
-            assert_mode_approval("accept-edits", False)
-
-        for eff in ("low", "medium", "high"):
-            self.assertEqual(validate_effort(eff), eff)
-        with self.assertRaises(ValidationError):
-            validate_effort("xhigh")
-
-        self.assertEqual(validate_timeout_seconds(None), 300)
-        self.assertEqual(validate_timeout_seconds(30), 30)
-        self.assertEqual(validate_timeout_seconds(900), 900)
-        for bad_t in (29, 901, True, False, "300"):
+        self.assertIsNone(validate_conversation_id(None))
+        self.assertIsNone(validate_conversation_id("   "))
+        cid = "51832851-9d83-41d4-857d-3c2c2f07f016"
+        self.assertEqual(validate_conversation_id(f"  {cid}  "), cid)
+        for bad_cid in ("ab", "has space", "bad\nid", "x" * 129):
             with self.assertRaises(ValidationError):
-                validate_timeout_seconds(bad_t)  # type: ignore[arg-type]
+                validate_conversation_id(bad_cid)
+
+        self.assertIsNone(validate_model(None))
+        self.assertIsNone(validate_model("   "))
+        self.assertEqual(validate_model("flash"), "flash")
+        self.assertEqual(validate_model("gemini-4-neon-xhigh"), "gemini-4-neon-xhigh")
+        for bad_model in ("-leading", "bad model", "bad\nline"):
+            with self.assertRaises(ValidationError):
+                validate_model(bad_model)
+
+        assert_dispatch_approved(True)
+        with self.assertRaises(DispatchBlockedError):
+            assert_dispatch_approved(False)
 
         self.assertEqual(validate_wait_seconds(None), 0)
-        self.assertEqual(validate_wait_seconds(45), 45)
-        for bad_w in (-1, 46, True, "5"):
+        self.assertEqual(validate_wait_seconds(30), 30)
+        for bad_w in (-1, 31, True, "5"):
             with self.assertRaises(ValidationError):
                 validate_wait_seconds(bad_w)  # type: ignore[arg-type]
 

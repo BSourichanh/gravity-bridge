@@ -123,6 +123,17 @@ class ValidateTestCase(unittest.TestCase):
         validate_mod.validate_plugin(copy, rep)
         self.assertTrue(any("chemin personnel" in e for e in rep.errors), rep.errors)
 
+    def test_detects_missing_relay_and_legacy_cli_files(self) -> None:
+        copy = self._copy_plugin("bad-legacy")
+        (copy / "scripts" / "sidecar_relay.py").unlink()
+        (copy / "scripts" / "worker.py").write_text("# legacy\n", encoding="utf-8")
+
+        rep = validate_mod.Report()
+        validate_mod.validate_plugin(copy, rep)
+        joined = "\n".join(rep.errors)
+        self.assertIn("sidecar_relay.py", joined)
+        self.assertIn("scripts/worker.py", joined)
+
     def test_fix_python_cmd_rewrites_only_target_copy_for_python_and_py3(self) -> None:
         repo_mcp_before = (PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8")
 

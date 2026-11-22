@@ -35,13 +35,14 @@ ALLOWED_LOCAL_MODULES = {
     "core",
     "security",
     "store",
-    "dispatcher",
-    "worker",
+    "sidecar_manager",
+    "sidecar_relay",
     "validate",
     "server",
 }
 EXPECTED_MCP_TOOLS = {
     "register_workspace",
+    "link_workspace",
     "list_workspaces",
     "send_message",
     "list_inbox",
@@ -444,6 +445,13 @@ def validate_plugin(root: Path, report: Report) -> None:
 
     if not (root / "README.md").is_file():
         report.error("README.md manquant à la racine du plugin.")
+
+    if not (root / "scripts" / "sidecar_relay.py").is_file():
+        report.error("Script requis manquant : scripts/sidecar_relay.py")
+
+    for legacy in ("core/dispatcher.py", "scripts/worker.py"):
+        if (root / legacy).exists():
+            report.error(f"Ancien module CLI obsolète détecté : {legacy}")
 
     for py_file in sorted(root.rglob("*.py")):
         if "__pycache__" in py_file.parts:

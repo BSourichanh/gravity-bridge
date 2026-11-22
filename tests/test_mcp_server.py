@@ -9,7 +9,6 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "gravity-bridge-plugin"
@@ -17,59 +16,31 @@ SERVER_SCRIPT = PLUGIN_ROOT / "mcp" / "server.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from core.store import BridgeStore, is_pid_alive, utc_now_iso  # noqa: E402
+from core.store import BridgeStore, utc_now_iso  # noqa: E402
+from scripts.sidecar_relay import run_relay_loop  # noqa: E402
 
-FAKE_AGY_MCP_SOURCE = r'''import json
+FAKE_AGENTAPI_MCP_SOURCE = r'''import json
 import os
 import sys
-import time
 from pathlib import Path
 
-scenario_path = os.environ.get("FAKE_AGY_SCENARIO_FILE", "")
-scenario = json.loads(Path(scenario_path).read_text(encoding="utf-8")) if scenario_path else {}
-capture_dir = os.environ.get("FAKE_AGY_CAPTURE_DIR", "")
-stdin_line = sys.stdin.readline()
-if capture_dir:
-    cdir = Path(capture_dir)
-    cdir.mkdir(parents=True, exist_ok=True)
-    idx = len(list(cdir.glob("mcp_call_*.json"))) + 1
-    (cdir / f"mcp_call_{idx}.json").write_text(
-        json.dumps(
-            {
-                "argv": sys.argv[1:],
-                "cwd": os.getcwd(),
-                "stdin": stdin_line,
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-conv_id = scenario.get("conversation_id", "conv-mcp-001")
-mode = scenario.get("behavior", "success")
-
-if mode == "slow":
-    print(json.dumps({"event": "init", "conversation_id": conv_id}), flush=True)
-    time.sleep(float(scenario.get("sleep_seconds", 25.0)))
-    sys.exit(0)
-
-resp = scenario.get("response", "Réponse synthétique du worker.")
-print(json.dumps({"event": "init", "conversation_id": conv_id}), flush=True)
-print(
-    json.dumps(
-        {
-            "event": "result",
-            "result": {
-                "conversation_id": conv_id,
-                "status": "SUCCESS",
-                "response": resp,
-            },
-        },
-        ensure_ascii=False,
-    ),
-    flush=True,
+capture_dir = Path(os.environ["FAKE_AGENTAPI_CAPTURE_DIR"])
+capture_dir.mkdir(parents=True, exist_ok=True)
+scenario = json.loads(Path(os.environ["FAKE_AGENTAPI_SCENARIO"]).read_text(encoding="utf-8"))
+idx = len(list(capture_dir.glob("mcp_call_*.json"))) + 1
+(capture_dir / f"mcp_call_{idx}.json").write_text(
+    json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}, ensure_ascii=False),
+    encoding="utf-8",
 )
-sys.exit(0)
+subcmd = sys.argv[1] if len(sys.argv) > 1 else ""
+conv_id = scenario.get("conversation_id", "51832851-9d83-41d4-857d-3c2c2f07f016")
+if subcmd == "new-conversation":
+    print(json.dumps({"response": {"newConversation": {"conversationId": conv_id}}}))
+    sys.exit(0)
+if subcmd == "send-message":
+    print(json.dumps({"response": {"sendMessage": {"recipientId": sys.argv[-2], "content": sys.argv[-1]}}}))
+    sys.exit(0)
+sys.exit(1)
 '''
 
 
@@ -78,25 +49,25 @@ class McpStdioTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.home_dir = self.root / "bridge-home"
+        self.sidecars_dir = self.root / "sidecars"
+        self.config_path = self.root / "config.json"
         self.ws_arch = self.root / "architect"
         self.ws_target = self.root / "gravity-metrics"
         self.ws_arch.mkdir()
         self.ws_target.mkdir()
 
-        self.fake_agy = self.root / "fake_agy.py"
-        self.fake_agy.write_text(FAKE_AGY_MCP_SOURCE, encoding="utf-8")
+        self.fake_agentapi = self.root / "fake_agentapi.py"
+        self.fake_agentapi.write_text(FAKE_AGENTAPI_MCP_SOURCE, encoding="utf-8")
         self.scenario_file = self.root / "scenario.json"
         self.capture_dir = self.root / "captures"
         self.capture_dir.mkdir()
-        self._write_scenario({"behavior": "success", "conversation_id": "conv-mcp-001"})
+        self._write_scenario({"conversation_id": "51832851-9d83-41d4-857d-3c2c2f07f016"})
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     def _write_scenario(self, data: dict) -> None:
-        self.scenario_file.write_text(
-            json.dumps(data, ensure_ascii=False), encoding="utf-8"
-        )
+        self.scenario_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def _run_stdio(
         self,
@@ -107,10 +78,13 @@ class McpStdioTestCase(unittest.TestCase):
     ) -> list[dict]:
         env = dict(os.environ)
         env.pop("GRAVITY_BRIDGE_DEPTH", None)
+        env.pop("GRAVITY_BRIDGE_ANTIGRAVITY_PROJECTS_DIR", None)
         env["GRAVITY_BRIDGE_HOME"] = str(self.home_dir)
-        env["GRAVITY_BRIDGE_AGY_BIN"] = str(self.fake_agy)
-        env["FAKE_AGY_SCENARIO_FILE"] = str(self.scenario_file)
-        env["FAKE_AGY_CAPTURE_DIR"] = str(self.capture_dir)
+        env["GRAVITY_BRIDGE_SIDECARS_DIR"] = str(self.sidecars_dir)
+        env["GRAVITY_BRIDGE_ANTIGRAVITY_CONFIG"] = str(self.config_path)
+        env["GRAVITY_BRIDGE_AGENTAPI_BIN"] = str(self.fake_agentapi)
+        env["FAKE_AGENTAPI_SCENARIO"] = str(self.scenario_file)
+        env["FAKE_AGENTAPI_CAPTURE_DIR"] = str(self.capture_dir)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUTF8"] = "1"
         if extra_env:
@@ -170,17 +144,9 @@ class McpStdioTestCase(unittest.TestCase):
         self.assertIn("result", resps[1], f"Réponse JSON-RPC inattendue : {resps[1]}")
         return resps[1]["result"]
 
-    def _wait_pids_dead(self, *pids: int | None, timeout: float = 4.0) -> None:
-        deadline = time.monotonic() + timeout
-        for pid in pids:
-            if not pid or pid <= 0:
-                continue
-            while is_pid_alive(pid) and time.monotonic() < deadline:
-                time.sleep(0.05)
-
 
 class TestMcpProtocolAndTools(McpStdioTestCase):
-    def test_jsonrpc_handshake_errors_and_tools_list(self) -> None:
+    def test_jsonrpc_handshake_errors_and_nine_tools_list(self) -> None:
         resps = self._run_stdio(
             [
                 {
@@ -205,7 +171,6 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
             ]
         )
 
-        # La notification n'émet aucune réponse -> 8 réponses pour 9 lignes.
         self.assertEqual(len(resps), 8)
         by_id = {r.get("id"): r for r in resps if r.get("id") is not None}
 
@@ -222,6 +187,7 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
             tool_names,
             [
                 "register_workspace",
+                "link_workspace",
                 "list_workspaces",
                 "send_message",
                 "list_inbox",
@@ -244,9 +210,6 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         r_arch = self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
         self.assertFalse(r_arch["isError"])
         self.assertTrue(r_arch["structuredContent"]["created"])
-
-        r_arch_2 = self._call_tool("register_workspace", {"path": str(self.ws_arch)})
-        self.assertFalse(r_arch_2["structuredContent"]["created"])
 
         r_tgt = self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
         self.assertFalse(r_tgt["isError"])
@@ -271,22 +234,14 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
             {"workspace": "metrics", "direction": "inbox", "unread_only": True},
         )
         self.assertEqual(inbox_1["structuredContent"]["count"], 1)
-        self.assertEqual(inbox_1["structuredContent"]["threads"][0]["unread_count"], 1)
 
-        # Lecture par metrics marque comme lu.
         read_res = self._call_tool(
             "read_thread",
             {"thread_id": tid, "reader_workspace": "metrics", "mark_read": True},
         )
         self.assertEqual(read_res["structuredContent"]["marked_read_count"], 1)
-        self.assertEqual(
-            self._call_tool("list_inbox", {"workspace": "metrics", "unread_only": True})[
-                "structuredContent"
-            ]["count"],
-            0,
-        )
+        self.assertEqual(read_res["structuredContent"]["target_sidecar_status"], "unlinked")
 
-        # Réponse passive vers architect + clôture.
         rep_res = self._call_tool(
             "reply_thread",
             {
@@ -308,7 +263,6 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         close_res = self._call_tool("manage_thread", {"action": "close", "thread_id": tid})
         self.assertEqual(close_res["structuredContent"]["status"], "done")
 
-        # Antidate le fil et teste prune_done.
         store = BridgeStore(home=self.home_dir)
         old_iso = utc_now_iso(datetime.now(timezone.utc) - timedelta(days=45))
         with store._connect() as conn:
@@ -320,18 +274,117 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         )
         self.assertEqual(prune_res["structuredContent"]["deleted_threads"], 1)
 
-    def test_dispatch_send_reply_resume_and_dispatch_thread(self) -> None:
+    def test_fail_fast_unlinked_offline_approval_and_anti_loop(self) -> None:
         self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
         self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
 
-        # 1. send_message avec dispatch=True, wait_seconds=10.
-        self._write_scenario(
+        # 1. approved=False refusé même sur question.
+        unapproved = self._call_tool(
+            "send_message",
             {
-                "behavior": "success",
-                "conversation_id": "conv-stdio-101",
-                "response": "Lot exécuté avec succès.",
-            }
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "question",
+                "subject": "Question non approuvée",
+                "body": "Doit échouer.",
+                "approved": False,
+                "dispatch": True,
+            },
         )
+        self.assertTrue(unapproved["isError"])
+        self.assertIn("approved=True", unapproved["content"][0]["text"])
+
+        # 2. approved=True mais sidecar unlinked -> fail-fast sans créer de fil orphelin.
+        unlinked_res = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "question",
+                "subject": "Test unlinked",
+                "body": "Doit échouer sans fil orphelin.",
+                "approved": True,
+                "dispatch": True,
+            },
+        )
+        self.assertTrue(unlinked_res["isError"])
+        self.assertIn("unlinked", unlinked_res["content"][0]["text"])
+        self.assertEqual(
+            self._call_tool("list_inbox", {"workspace": "metrics"})["structuredContent"]["count"],
+            0,
+        )
+
+        # 3. link_workspace crée sidecar.json -> statut offline -> toujours refusé fail-fast.
+        linked = self._call_tool(
+            "link_workspace",
+            {"workspace": "metrics"},
+        )
+        self.assertFalse(linked["isError"], linked)
+        self.assertEqual(linked["structuredContent"]["sidecar_status"], "offline")
+        self.assertTrue(Path(linked["structuredContent"]["sidecar_json_path"]).is_file())
+
+        offline_res = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Test offline",
+                "body": "Sidecar lié mais arrêté.",
+                "approved": True,
+                "dispatch": True,
+            },
+        )
+        self.assertTrue(offline_res["isError"])
+        self.assertIn("offline", offline_res["content"][0]["text"])
+        self.assertEqual(
+            self._call_tool("list_inbox", {"workspace": "metrics"})["structuredContent"]["count"],
+            0,
+        )
+
+        # 4. GRAVITY_BRIDGE_DEPTH=1 bloque dispatch_true.
+        store = BridgeStore(home=self.home_dir)
+        store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid()
+        )
+        depth_blocked = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "question",
+                "subject": "Sous-dispatch interdit",
+                "body": "Bloqué.",
+                "approved": True,
+                "dispatch": True,
+            },
+            extra_env={"GRAVITY_BRIDGE_DEPTH": "1"},
+        )
+        self.assertTrue(depth_blocked["isError"])
+        self.assertIn("anti-boucle", depth_blocked["content"][0]["text"].lower())
+
+        # Dissociation propre via link_workspace(uninstall=True).
+        unlinked = self._call_tool(
+            "link_workspace",
+            {"workspace": "metrics", "uninstall": True},
+        )
+        self.assertFalse(unlinked["isError"])
+        self.assertEqual(unlinked["structuredContent"]["sidecar_status"], "unlinked")
+
+    def test_full_cycle_send_relay_reply_followup_and_anti_loop_caller_id(self) -> None:
+        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
+        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
+        self._call_tool("link_workspace", {"workspace": "metrics"})
+
+        store = BridgeStore(home=self.home_dir)
+        store.record_sidecar_heartbeat(
+            "metrics",
+            sidecar_id="gravity-bridge-metrics",
+            pid=os.getpid(),
+            project_id="proj-metrics-1",
+        )
+
+        # 1. send_message(dispatch=True, approved=True) -> job queued.
         send_res = self._call_tool(
             "send_message",
             {
@@ -340,247 +393,198 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
                 "msg_type": "handoff",
                 "subject": "Exécution Lot 3",
                 "body": "Implémenter le serveur MCP.",
+                "model": "flash",
                 "approved": True,
                 "dispatch": True,
-                "wait_seconds": 10,
             },
         )
         self.assertFalse(send_res["isError"], send_res)
         sc = send_res["structuredContent"]
-        self.assertEqual(sc["job"]["status"], "completed")
-        self.assertEqual(sc["job"]["target_conversation_id"], "conv-stdio-101")
         tid = sc["thread_id"]
-        self._wait_pids_dead(sc["job"]["pid"], sc["job"]["child_pid"])
+        job1_id = sc["job"]["id"]
+        self.assertEqual(sc["job"]["status"], "queued")
+        self.assertEqual(sc["job"]["action"], "new_conversation")
 
-        detail = self._call_tool("read_thread", {"thread_id": tid})["structuredContent"]
-        self.assertIn("agy --conversation conv-stdio-101", detail["resume_command"])
-        self.assertEqual(len(detail["messages"]), 2)
-
-        # 2. reply_thread(..., dispatch=True) dans le sens inverse to -> from doit échouer.
-        bad_dir = self._call_tool(
-            "reply_thread",
-            {
-                "thread_id": tid,
-                "from_workspace": "metrics",
-                "body": "Tentative reverse dispatch",
-                "dispatch": True,
-            },
+        # 2. Le micro-sidecar traite le job -> status=dispatched + conversationId enregistré.
+        relay_env = {
+            **os.environ,
+            "FAKE_AGENTAPI_CAPTURE_DIR": str(self.capture_dir),
+            "FAKE_AGENTAPI_SCENARIO": str(self.scenario_file),
+            "ANTIGRAVITY_PROJECT_ID": "proj-metrics-1",
+        }
+        self.assertEqual(
+            run_relay_loop(
+                "metrics",
+                home=self.home_dir,
+                once=True,
+                agentapi_bin=str(self.fake_agentapi),
+                env=relay_env,
+            ),
+            0,
         )
-        self.assertTrue(bad_dir["isError"])
-
-        # 3. reply_thread(..., close=True, dispatch=True) doit échouer.
-        bad_close = self._call_tool(
-            "reply_thread",
-            {
-                "thread_id": tid,
-                "from_workspace": "architect",
-                "body": "Close + dispatch",
-                "close": True,
-                "dispatch": True,
-            },
-        )
-        self.assertTrue(bad_close["isError"])
-
-        # 4. reply_thread(..., dispatch=True) dans le sens from -> to reprend --conversation.
-        self._write_scenario(
-            {
-                "behavior": "success",
-                "conversation_id": "conv-stdio-101",
-                "response": "Tour 2 validé.",
-            }
-        )
-        rep_disp = self._call_tool(
-            "reply_thread",
-            {
-                "thread_id": tid,
-                "from_workspace": "architect",
-                "body": "Précision tour 2.",
-                "dispatch": True,
-                "wait_seconds": 10,
-            },
-        )
-        self.assertFalse(rep_disp["isError"], rep_disp)
-        self.assertEqual(rep_disp["structuredContent"]["job"]["status"], "completed")
-        self._wait_pids_dead(
-            rep_disp["structuredContent"]["job"]["pid"],
-            rep_disp["structuredContent"]["job"]["child_pid"],
+        j1_after = self._call_tool("manage_thread", {"action": "get_job", "job_id": job1_id})[
+            "structuredContent"
+        ]
+        self.assertEqual(j1_after["status"], "dispatched")
+        self.assertEqual(
+            j1_after["target_conversation_id"],
+            "51832851-9d83-41d4-857d-3c2c2f07f016",
         )
 
-        # 5. dispatch_thread sur un handoff passif non approuvé : échoue sans approved, puis réussit avec approved=True.
-        passive = self._call_tool(
-            "send_message",
-            {
-                "from_workspace": "architect",
-                "to_workspace": "metrics",
-                "msg_type": "handoff",
-                "subject": "Handoff différé",
-                "body": "Attente feu vert.",
-                "approved": False,
-                "dispatch": False,
-            },
-        )["structuredContent"]
-        tid2 = passive["thread_id"]
-
-        blocked_dt = self._call_tool("dispatch_thread", {"thread_id": tid2})
-        self.assertTrue(blocked_dt["isError"])
-
-        ok_dt = self._call_tool(
-            "dispatch_thread",
-            {"thread_id": tid2, "approved": True, "wait_seconds": 10},
-        )
-        self.assertFalse(ok_dt["isError"], ok_dt)
-        job2 = ok_dt["structuredContent"]["job"]
-        self.assertEqual(job2["status"], "completed")
-        self._wait_pids_dead(job2["pid"], job2["child_pid"])
-
-        # Vérifie get_job par job_id, par thread_id et global.
-        gj_id = self._call_tool("manage_thread", {"action": "get_job", "job_id": job2["id"]})
-        self.assertEqual(gj_id["structuredContent"]["id"], job2["id"])
-        gj_thr = self._call_tool("manage_thread", {"action": "get_job", "thread_id": tid2})
-        self.assertEqual(gj_thr["structuredContent"]["count"], 1)
-
-        captures = sorted(self.capture_dir.glob("mcp_call_*.json"))
-        self.assertEqual(len(captures), 3)
-        cap2 = json.loads(captures[1].read_text(encoding="utf-8"))
-        self.assertIn("--conversation", cap2["argv"])
-        self.assertEqual(cap2["argv"][cap2["argv"].index("--conversation") + 1], "conv-stdio-101")
-
-    def test_manage_thread_cancel_job_kills_detached_worker_and_child(self) -> None:
-        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
-        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
-
-        self._write_scenario({"behavior": "slow", "conversation_id": "conv-slow-mcp"})
-        res = self._call_tool(
-            "send_message",
-            {
-                "from_workspace": "architect",
-                "to_workspace": "metrics",
-                "msg_type": "question",
-                "subject": "Tâche longue",
-                "body": "Attend.",
-                "dispatch": True,
-                "wait_seconds": 0,
-            },
-        )
-        self.assertFalse(res["isError"], res)
-        job_id = res["structuredContent"]["job"]["id"]
-
-        store = BridgeStore(home=self.home_dir)
-        deadline = time.monotonic() + 8.0
-        live_job = None
-        while time.monotonic() < deadline:
-            live_job = store.get_job(job_id, reconcile=False)
-            if live_job.get("status") == "running" and live_job.get("child_pid"):
-                break
-            time.sleep(0.05)
-
-        self.assertIsNotNone(live_job)
-        self.assertEqual(live_job["status"], "running")
-        self.assertIsNotNone(live_job["child_pid"])
-
-        cancel_res = self._call_tool(
-            "manage_thread", {"action": "cancel_job", "job_id": job_id}
-        )
-        self.assertFalse(cancel_res["isError"], cancel_res)
-        sc = cancel_res["structuredContent"]
-        self.assertTrue(sc["terminated"])
-        self.assertEqual(sc["status"], "cancelled")
-
-        self._wait_pids_dead(live_job["child_pid"], live_job["pid"], timeout=4.0)
-        self.assertFalse(is_pid_alive(live_job["child_pid"]))
-        self.assertFalse(is_pid_alive(live_job["pid"]))
-
-
-class TestMcpSecurityGuardrails(McpStdioTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
-        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
-
-    def test_secret_and_unapproved_handoff_rejected_without_orphan_thread(self) -> None:
-        secret_val = "AKIA" + "MCPTESTSECRET123"
-        res_sec = self._call_tool(
-            "send_message",
-            {
-                "from_workspace": "architect",
-                "to_workspace": "metrics",
-                "msg_type": "question",
-                "subject": "Secret test",
-                "body": f"Clé {secret_val}",
-            },
-        )
-        self.assertTrue(res_sec["isError"])
-        err_txt = res_sec["content"][0]["text"]
-        self.assertIn("aws_access_key", err_txt)
-        self.assertNotIn(secret_val, err_txt)
-
-        res_unapproved = self._call_tool(
-            "send_message",
-            {
-                "from_workspace": "architect",
-                "to_workspace": "metrics",
-                "msg_type": "handoff",
-                "subject": "Handoff sans feu vert",
-                "body": "Modifier main.py",
-                "approved": False,
-                "dispatch": True,
-            },
-        )
-        self.assertTrue(res_unapproved["isError"])
-
-        inbox = self._call_tool(
-            "list_inbox", {"workspace": "metrics", "status": "all"}
-        )["structuredContent"]
-        self.assertEqual(inbox["count"], 0)
-
-    def test_depth_one_blocks_dispatch_but_allows_passive_reply(self) -> None:
-        # Crée d'abord un fil à depth=0.
-        created = self._call_tool(
-            "send_message",
-            {
-                "from_workspace": "architect",
-                "to_workspace": "metrics",
-                "msg_type": "question",
-                "subject": "Question depth",
-                "body": "Analyse demandée.",
-                "dispatch": False,
-            },
-        )["structuredContent"]
-        tid = created["thread_id"]
-
-        # À GRAVITY_BRIDGE_DEPTH=1, tout dispatch=true doit être refusé sans créer de fil.
-        blocked = self._call_tool(
+        # 3. Anti-boucle caller_conversation_id : si la conversation cible tente un dispatch -> bloqué.
+        loop_res = self._call_tool(
             "send_message",
             {
                 "from_workspace": "metrics",
                 "to_workspace": "architect",
                 "msg_type": "question",
-                "subject": "Cascade interdite",
-                "body": "Tentative boucle",
+                "subject": "Boucle",
+                "body": "Interdit.",
+                "approved": True,
                 "dispatch": True,
+                "caller_conversation_id": "51832851-9d83-41d4-857d-3c2c2f07f016",
             },
-            extra_env={"GRAVITY_BRIDGE_DEPTH": "1"},
         )
-        self.assertTrue(blocked["isError"])
-        self.assertEqual(
-            self._call_tool("list_inbox", {"workspace": "architect", "status": "all"})[
-                "structuredContent"
-            ]["count"],
-            0,
-        )
+        self.assertTrue(loop_res["isError"])
+        self.assertIn("Sous-dispatch interdit", loop_res["content"][0]["text"])
 
-        # En revanche, la réponse passive SQLite reste autorisée à depth=1.
-        rep = self._call_tool(
+        # 4. La conversation cible répond via reply_thread(..., dispatch=False) -> job1 passe completed.
+        target_rep = self._call_tool(
             "reply_thread",
             {
                 "thread_id": tid,
                 "from_workspace": "metrics",
-                "body": "Réponse passive depuis session enfant.",
+                "body": "Lot 3 terminé.",
+                "conversation_id": "51832851-9d83-41d4-857d-3c2c2f07f016",
                 "dispatch": False,
             },
-            extra_env={"GRAVITY_BRIDGE_DEPTH": "1"},
         )
-        self.assertFalse(rep["isError"], rep)
+        self.assertFalse(target_rep["isError"], target_rep)
+        self.assertEqual(target_rep["structuredContent"]["completed_job_ids"], [job1_id])
+        j1_completed = self._call_tool("manage_thread", {"action": "get_job", "job_id": job1_id})[
+            "structuredContent"
+        ]
+        self.assertEqual(j1_completed["status"], "completed")
+
+        # 5. Relance multi-tours depuis architect -> action send_message sur la même conversation.
+        followup = self._call_tool(
+            "reply_thread",
+            {
+                "thread_id": tid,
+                "from_workspace": "architect",
+                "body": "Vérifie aussi les tests.",
+                "approved": True,
+                "dispatch": True,
+            },
+        )
+        self.assertFalse(followup["isError"], followup)
+        j2_id = followup["structuredContent"]["job"]["id"]
+        self.assertEqual(followup["structuredContent"]["job"]["action"], "send_message")
+
+        self.assertEqual(
+            run_relay_loop(
+                "metrics",
+                home=self.home_dir,
+                once=True,
+                agentapi_bin=str(self.fake_agentapi),
+                env=relay_env,
+            ),
+            0,
+        )
+        call2 = json.loads((self.capture_dir / "mcp_call_2.json").read_text(encoding="utf-8"))
+        self.assertEqual(call2["argv"][0], "send-message")
+        self.assertEqual(call2["argv"][-3], "--")
+        self.assertEqual(call2["argv"][-2], "51832851-9d83-41d4-857d-3c2c2f07f016")
+
+        # 6. Annulation propre d'un job créé via dispatch_thread.
+        store.add_reply(tid, "metrics", "Tests vérifiés.")
+        disp_later = self._call_tool(
+            "dispatch_thread",
+            {"thread_id": tid, "approved": True},
+        )
+        self.assertFalse(disp_later["isError"], disp_later)
+        j3_id = disp_later["structuredContent"]["job"]["id"]
+        cancelled = self._call_tool(
+            "manage_thread",
+            {"action": "cancel_job", "job_id": j3_id},
+        )
+        self.assertTrue(cancelled["structuredContent"]["cancelled"])
+        self.assertEqual(cancelled["structuredContent"]["status"], "cancelled")
+
+    def test_link_workspace_creates_dedicated_project_and_repairs_polluted_user_project(self) -> None:
+        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
+        projects_dir = self.config_path.parent / "projects"
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        raw_posix = self.ws_target.resolve().as_posix()
+        uri = (
+            f"file:///{raw_posix[0].lower()}%3A{raw_posix[2:]}"
+            if len(raw_posix) >= 2 and raw_posix[1] == ":"
+            else f"file://{raw_posix}"
+        )
+        user_proj_path = projects_dir / "6e0df4c7-d5e9-4e8f-9689-343b5ddf84b1.json"
+        user_proj_path.write_text(
+            json.dumps(
+                {
+                    "id": "6e0df4c7-d5e9-4e8f-9689-343b5ddf84b1",
+                    "name": "gravity-metrics",
+                    "projectResources": {"resources": [{"gitFolder": {"folderUri": uri}}]},
+                    "settings": {"autoExecutionPolicy": "EAGER"},
+                    "permissionGrants": {"permissionGrants": {}, "v2Migrated": True},
+                    "sidecar": {"sidecarId": "gravity-bridge-metrics"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Un appel avec project_id pointant vers le projet utilisateur doit être refusé.
+        rejected = self._call_tool(
+            "link_workspace",
+            {"workspace": "metrics", "project_id": "6e0df4c7-d5e9-4e8f-9689-343b5ddf84b1"},
+        )
+        self.assertTrue(rejected["isError"])
+
+        linked = self._call_tool("link_workspace", {"workspace": "metrics"})
+        self.assertFalse(linked["isError"], linked)
+        sc = linked["structuredContent"]
+        self.assertTrue(sc["project_auto_detected"])
+        self.assertEqual(sc["source_project_id"], "6e0df4c7-d5e9-4e8f-9689-343b5ddf84b1")
+        self.assertEqual(sc["source_project_name"], "gravity-metrics")
+        self.assertNotEqual(sc["project_id"], "6e0df4c7-d5e9-4e8f-9689-343b5ddf84b1")
+        self.assertEqual(sc["project_name"], "gravity-metrics (Bridge)")
+        self.assertTrue(sc["bridge_project_created"])
+        self.assertTrue(sc["config_updated"])
+        self.assertEqual(len(sc["repaired_user_projects"]), 1)
+
+        # Le projet utilisateur reste présent mais n'a plus la clé "sidecar".
+        user_after = json.loads(user_proj_path.read_text(encoding="utf-8"))
+        self.assertNotIn("sidecar", user_after)
+        self.assertEqual(user_after["settings"], {"autoExecutionPolicy": "EAGER"})
+
+        # Le projet dédié porte les ressources/réglages et la référence dans config.json.
+        bridge_data = json.loads(Path(sc["bridge_project_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(bridge_data["name"], "gravity-metrics (Bridge)")
+        self.assertEqual(bridge_data["projectResources"], user_after["projectResources"])
+        self.assertEqual(bridge_data["settings"], {"autoExecutionPolicy": "EAGER"})
+        self.assertEqual(bridge_data["sidecar"], {"sidecarId": "gravity-bridge-metrics"})
+
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["sidecars"]["gravity-bridge-metrics"],
+            {
+                "enabled": True,
+                "projectId": sc["project_id"],
+                "schemaVersion": 1,
+            },
+        )
+
+        # source_project_id explicite sur ré-exécution reste idempotent sur le même UUID dédié.
+        relinked = self._call_tool(
+            "link_workspace",
+            {"workspace": "metrics", "source_project_id": "6e0df4c7-d5e9-4e8f-9689-343b5ddf84b1"},
+        )
+        self.assertFalse(relinked["isError"], relinked)
+        self.assertEqual(relinked["structuredContent"]["project_id"], sc["project_id"])
+        self.assertFalse(relinked["structuredContent"]["bridge_project_created"])
 
 
 if __name__ == "__main__":

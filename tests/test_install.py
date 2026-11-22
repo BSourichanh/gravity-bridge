@@ -1,10 +1,10 @@
-"""Tests unitaires de l'installeur/désinstalleur install.py."""
+"""Tests unitaires de l'installeur/désinstalleur et liaison CLI install.py."""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +27,11 @@ class InstallTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.target = self.root / "plugins" / "gravity-bridge"
+        self.home_dir = self.root / "bridge-home"
+        self.sidecars_dir = self.root / "sidecars"
+        self.config_path = self.root / "config.json"
+        self.ws_repo = self.root / "sample-project"
+        self.ws_repo.mkdir()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -41,29 +46,223 @@ class InstallTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue((self.target / "plugin.json").is_file())
         self.assertTrue((self.target / "mcp" / "server.py").is_file())
-        self.assertTrue((self.target / "scripts" / "worker.py").is_file())
+        self.assertTrue((self.target / "scripts" / "sidecar_relay.py").is_file())
+        self.assertFalse((self.target / "scripts" / "worker.py").exists())
         self.assertEqual(list(self.target.rglob("__pycache__")), [])
 
-        # Un fichier résiduel dans target doit être nettoyé lors d'une réinstallation propre.
         stale_file = self.target / "obsolete.txt"
         stale_file.write_text("stale", encoding="utf-8")
         rc_reinstall = install_mod.main(["--target", str(self.target)])
         self.assertEqual(rc_reinstall, 0)
         self.assertFalse(stale_file.exists())
 
-        # Le dépôt source garde toujours "python3".
         repo_mcp_after = json.loads(
             (PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8")
         )
         self.assertEqual(repo_mcp_after["mcpServers"]["bridge"]["command"], "python3")
 
-        # Désinstallation propre et idempotente.
         rc_uninst = install_mod.main(["--uninstall", "--target", str(self.target)])
         self.assertEqual(rc_uninst, 0)
         self.assertFalse(self.target.exists())
         self.assertEqual(
             install_mod.main(["--uninstall", "--target", str(self.target)]), 0
         )
+
+    def test_reinstall_handles_locked_target_root_directory(self) -> None:
+        self.assertEqual(install_mod.main(["--target", str(self.target)]), 0)
+        stale = self.target / "stale.txt"
+        stale.write_text("old", encoding="utf-8")
+
+        import shutil
+
+        real_rmtree = shutil.rmtree
+        target_resolved = self.target.resolve()
+
+        def _rmtree_locked_root(path, *args, **kwargs):
+            if Path(path).resolve() == target_resolved:
+                raise PermissionError(32, "Directory locked by active MCP cwd")
+            return real_rmtree(path, *args, **kwargs)
+
+        with mock.patch.object(install_mod.shutil, "rmtree", side_effect=_rmtree_locked_root):
+            rc = install_mod.main(["--target", str(self.target)])
+
+        self.assertEqual(rc, 0)
+        self.assertFalse(stale.exists())
+        self.assertTrue((self.target / "plugin.json").is_file())
+        self.assertTrue((self.target / "scripts" / "sidecar_relay.py").is_file())
+
+    def test_link_and_unlink_cli_point_to_installed_target_relay(self) -> None:
+        projects_dir = self.root / "projects"
+        # --link avant installation échoue proprement.
+        rc_missing = install_mod.main(
+            [
+                "--link",
+                str(self.ws_repo),
+                "--target",
+                str(self.target),
+                "--sidecars-dir",
+                str(self.sidecars_dir),
+                "--config-path",
+                str(self.config_path),
+                "--projects-dir",
+                str(projects_dir),
+                "--home",
+                str(self.home_dir),
+            ]
+        )
+        self.assertEqual(rc_missing, 1)
+
+        # Installe puis lie le workspace avec --slug et --project-id dédié neuf.
+        self.assertEqual(install_mod.main(["--target", str(self.target)]), 0)
+        rc_link = install_mod.main(
+            [
+                "--link",
+                str(self.ws_repo),
+                "--slug",
+                "sample-ws",
+                "--project-id",
+                "proj-sample-bridge-1",
+                "--configure-config",
+                "--target",
+                str(self.target),
+                "--sidecars-dir",
+                str(self.sidecars_dir),
+                "--config-path",
+                str(self.config_path),
+                "--projects-dir",
+                str(projects_dir),
+                "--home",
+                str(self.home_dir),
+            ]
+        )
+        self.assertEqual(rc_link, 0)
+
+        sidecar_json = self.sidecars_dir / "gravity-bridge-sample-ws" / "sidecar.json"
+        self.assertTrue(sidecar_json.is_file())
+        sc = json.loads(sidecar_json.read_text(encoding="utf-8"))
+        self.assertIn(
+            str((self.target / "scripts" / "sidecar_relay.py").resolve()),
+            sc["args"],
+        )
+        self.assertIn("sample-ws", sc["args"])
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            cfg["sidecars"]["gravity-bridge-sample-ws"],
+            {"enabled": True, "projectId": "proj-sample-bridge-1", "schemaVersion": 1},
+        )
+        bridge_proj = projects_dir / "proj-sample-bridge-1.json"
+        self.assertTrue(bridge_proj.is_file())
+        self.assertEqual(
+            json.loads(bridge_proj.read_text(encoding="utf-8"))["name"],
+            "sample-ws (Bridge)",
+        )
+
+        # --unlink supprime le micro-sidecar, le projet dédié et nettoie config.json.
+        rc_unlink = install_mod.main(
+            [
+                "--unlink",
+                "sample-ws",
+                "--configure-config",
+                "--target",
+                str(self.target),
+                "--sidecars-dir",
+                str(self.sidecars_dir),
+                "--config-path",
+                str(self.config_path),
+                "--projects-dir",
+                str(projects_dir),
+                "--home",
+                str(self.home_dir),
+            ]
+        )
+        self.assertEqual(rc_unlink, 0)
+        self.assertFalse(sidecar_json.parent.exists())
+        self.assertFalse(bridge_proj.exists())
+        cfg_after = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("gravity-bridge-sample-ws", cfg_after["sidecars"])
+
+    def test_link_cli_creates_dedicated_bridge_project_mirrors_source_and_cleans_on_unlink(self) -> None:
+        self.assertEqual(install_mod.main(["--target", str(self.target)]), 0)
+        projects_dir = self.root / "projects"
+        projects_dir.mkdir()
+        raw_posix = self.ws_repo.resolve().as_posix()
+        uri = (
+            f"file:///{raw_posix[0].lower()}%3A{raw_posix[2:]}"
+            if len(raw_posix) >= 2 and raw_posix[1] == ":"
+            else f"file://{raw_posix}"
+        )
+        user_proj = projects_dir / "proj-auto-99.json"
+        user_proj.write_text(
+            json.dumps(
+                {
+                    "id": "proj-auto-99",
+                    "name": "sample-project",
+                    "projectResources": {"resources": [{"gitFolder": {"folderUri": uri}}]},
+                    "settings": {"artifactReviewMode": "TURBO"},
+                    "sidecar": {"sidecarId": "gravity-bridge-sample-project"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        rc = install_mod.main(
+            [
+                "--link",
+                str(self.ws_repo),
+                "--source-project-id",
+                "proj-auto-99",
+                "--configure-config",
+                "--target",
+                str(self.target),
+                "--sidecars-dir",
+                str(self.sidecars_dir),
+                "--config-path",
+                str(self.config_path),
+                "--projects-dir",
+                str(projects_dir),
+                "--home",
+                str(self.home_dir),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+        bridge_id = cfg["sidecars"]["gravity-bridge-sample-project"]["projectId"]
+        self.assertNotEqual(bridge_id, "proj-auto-99")
+        self.assertEqual(cfg["sidecars"]["gravity-bridge-sample-project"]["enabled"], True)
+        self.assertEqual(cfg["sidecars"]["gravity-bridge-sample-project"]["schemaVersion"], 1)
+
+        # Le projet utilisateur a été réparé (sans "sidecar") et préservé.
+        user_after = json.loads(user_proj.read_text(encoding="utf-8"))
+        self.assertNotIn("sidecar", user_after)
+
+        # Le projet dédié porte le suffixe (Bridge) et reflète les ressources/settings.
+        bridge_file = projects_dir / f"{bridge_id}.json"
+        self.assertTrue(bridge_file.is_file())
+        bridge_data = json.loads(bridge_file.read_text(encoding="utf-8"))
+        self.assertEqual(bridge_data["name"], "sample-project (Bridge)")
+        self.assertEqual(bridge_data["settings"], {"artifactReviewMode": "TURBO"})
+        self.assertEqual(bridge_data["projectResources"], user_after["projectResources"])
+
+        # --unlink avec --projects-dir supprime uniquement le projet dédié et laisse le projet utilisateur.
+        rc_un = install_mod.main(
+            [
+                "--unlink",
+                "sample-project",
+                "--target",
+                str(self.target),
+                "--sidecars-dir",
+                str(self.sidecars_dir),
+                "--config-path",
+                str(self.config_path),
+                "--projects-dir",
+                str(projects_dir),
+                "--home",
+                str(self.home_dir),
+            ]
+        )
+        self.assertEqual(rc_un, 0)
+        self.assertFalse(bridge_file.exists())
+        self.assertTrue(user_proj.is_file())
 
     def test_windows_python3_adaptation_on_installed_copy(self) -> None:
         with mock.patch.object(
@@ -89,7 +288,6 @@ class InstallTestCase(unittest.TestCase):
             ["-3", "-B", "${PLUGIN_ROOT}/mcp/server.py"],
         )
 
-        # Le dépôt source reste inchangé.
         repo_cfg = json.loads(
             (PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8")
         )
@@ -100,7 +298,6 @@ class InstallTestCase(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(self.target.exists())
 
-        # Crée un dossier puis vérifie que --uninstall --dry-run le conserve.
         self.target.mkdir(parents=True)
         (self.target / "marker.txt").write_text("keep", encoding="utf-8")
         rc_un = install_mod.main(["--uninstall", "--target", str(self.target), "--dry-run"])

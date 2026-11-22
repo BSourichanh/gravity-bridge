@@ -6,26 +6,31 @@ import os
 from pathlib import Path
 import re
 import unicodedata
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
 MAX_BODY_BYTES = 32_768
 MAX_SUBJECT_CHARS = 160
 MAX_FILE_REFS = 20
 MAX_FILE_REF_CHARS = 240
-MIN_TIMEOUT_SECONDS = 30
-DEFAULT_TIMEOUT_SECONDS = 300
-MAX_TIMEOUT_SECONDS = 900
-MAX_WAIT_SECONDS = 45
+MAX_WAIT_SECONDS = 30
 MAX_LOG_BYTES = 262_144
-QUEUED_GRACE_SECONDS = 30
+SIDECAR_STALE_SECONDS = 20
+CLAIM_GRACE_SECONDS = 30
+AGENTAPI_TIMEOUT_SECONDS = 30
 SLUG_MAX_CHARS = 49
+SIDECAR_ID_MAX_CHARS = 80
+MODEL_MAX_CHARS = 80
+CONVERSATION_ID_MIN_CHARS = 3
+CONVERSATION_ID_MAX_CHARS = 128
 
 ALLOWED_THREAD_MSG_TYPES = ("question", "handoff", "info")
 ALLOWED_ALL_MSG_TYPES = ("question", "handoff", "info", "reply")
-ALLOWED_MODES = ("plan", "accept-edits")
-ALLOWED_EFFORTS = ("low", "medium", "high")
+ALLOWED_JOB_ACTIONS = ("new_conversation", "send_message")
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,48}$")
+SIDECAR_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,79}\Z")
+CONVERSATION_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{3,128}\Z")
+MODEL_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}\Z")
 
 _CONTROL_CHARS_STRICT_RE = re.compile(r"[\x00-\x1f\x7f]")
 _WINDOWS_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -113,7 +118,7 @@ def assert_no_secrets(text: str, field_name: str = "content") -> None:
 
 
 def redact_secrets(text: str) -> Tuple[str, List[str]]:
-    """Caviarde les secrets potentiels dans une sortie worker ou un log."""
+    """Caviarde les secrets potentiels dans une sortie relais ou un log."""
     if not text:
         return text, []
 
@@ -196,6 +201,18 @@ def validate_slug(slug: str) -> str:
     if not SLUG_RE.match(candidate):
         raise ValidationError(
             "Slug invalide : doit correspondre à ^[a-z0-9][a-z0-9_-]{0,48}$."
+        )
+    return candidate
+
+
+def validate_sidecar_id(sidecar_id: str) -> str:
+    """Valide un identifiant de sidecar Antigravity (<= 80 caractères, alphanumérique/-/_)."""
+    if not isinstance(sidecar_id, str):
+        raise ValidationError("sidecar_id doit être une chaîne de caractères.")
+    candidate = sidecar_id.strip()
+    if not SIDECAR_ID_RE.match(candidate):
+        raise ValidationError(
+            "sidecar_id invalide : doit correspondre à ^[a-z0-9][a-z0-9_-]{0,79}$."
         )
     return candidate
 
@@ -344,26 +361,56 @@ def validate_msg_type(msg_type: str, *, allow_reply: bool = False) -> str:
     return msg_type
 
 
-def validate_mode(mode: Optional[str]) -> Optional[str]:
-    """Valide le mode d'exécution agy optionnel."""
-    if mode is None:
-        return None
-    if not isinstance(mode, str) or mode not in ALLOWED_MODES:
+def validate_job_action(action: str) -> str:
+    """Valide l'action agentapi d'un job (new_conversation ou send_message)."""
+    if not isinstance(action, str):
+        raise ValidationError("action doit être une chaîne de caractères.")
+    if action not in ALLOWED_JOB_ACTIONS:
         raise ValidationError(
-            f"mode invalide ({mode!r}). Valeurs autorisées : {', '.join(ALLOWED_MODES)}."
+            f"action de job invalide ({action!r}). Valeurs autorisées : {', '.join(ALLOWED_JOB_ACTIONS)}."
         )
-    return mode
+    return action
 
 
-def validate_effort(effort: Optional[str]) -> Optional[str]:
-    """Valide l'effort de raisonnement agy optionnel."""
-    if effort is None:
+def validate_conversation_id(
+    value: Optional[str],
+    *,
+    field_name: str = "conversation_id",
+) -> Optional[str]:
+    """Valide un identifiant de conversation Antigravity (None si vide)."""
+    if value is None:
         return None
-    if not isinstance(effort, str) or effort not in ALLOWED_EFFORTS:
+    if not isinstance(value, str):
+        raise ValidationError(f"{field_name} doit être une chaîne de caractères.")
+    if _CONTROL_CHARS_STRICT_RE.search(value):
+        raise ValidationError(f"{field_name} contient des caractères de contrôle interdits.")
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if not CONVERSATION_ID_RE.match(stripped):
         raise ValidationError(
-            f"effort invalide ({effort!r}). Valeurs autorisées : {', '.join(ALLOWED_EFFORTS)}."
+            f"{field_name} invalide : doit correspondre à ^[A-Za-z0-9_-]{{3,128}}$."
         )
-    return effort
+    return stripped
+
+
+def validate_model(model: Optional[str]) -> Optional[str]:
+    """Valide un sélecteur de modèle agentapi optionnel (None si vide)."""
+    if model is None:
+        return None
+    if not isinstance(model, str):
+        raise ValidationError("model doit être une chaîne de caractères.")
+    if _CONTROL_CHARS_STRICT_RE.search(model):
+        raise ValidationError("model contient des caractères de contrôle interdits.")
+    stripped = model.strip()
+    if not stripped:
+        return None
+    if not MODEL_RE.match(stripped):
+        raise ValidationError(
+            "model invalide : doit correspondre à ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$."
+        )
+    assert_no_secrets(stripped, field_name="model")
+    return stripped
 
 
 def validate_int_range(
@@ -386,19 +433,8 @@ def validate_int_range(
     return value
 
 
-def validate_timeout_seconds(timeout_seconds: Optional[int]) -> int:
-    """Valide timeout_seconds dans [30, 900]."""
-    return validate_int_range(
-        timeout_seconds,
-        name="timeout_seconds",
-        default=DEFAULT_TIMEOUT_SECONDS,
-        min_value=MIN_TIMEOUT_SECONDS,
-        max_value=MAX_TIMEOUT_SECONDS,
-    )
-
-
 def validate_wait_seconds(wait_seconds: Optional[int]) -> int:
-    """Valide wait_seconds dans [0, 45]."""
+    """Valide wait_seconds dans [0, 30]."""
     return validate_int_range(
         wait_seconds,
         name="wait_seconds",
@@ -406,18 +442,6 @@ def validate_wait_seconds(wait_seconds: Optional[int]) -> int:
         min_value=0,
         max_value=MAX_WAIT_SECONDS,
     )
-
-
-def resolve_effective_mode(
-    thread_msg_type: str,
-    explicit_mode: Optional[str] = None,
-) -> str:
-    """Détermine le mode agy effectif à partir du type du fil ou d'un override valide."""
-    validate_msg_type(thread_msg_type, allow_reply=False)
-    validated = validate_mode(explicit_mode)
-    if validated is not None:
-        return validated
-    return "accept-edits" if thread_msg_type == "handoff" else "plan"
 
 
 def get_bridge_depth(env: Optional[Mapping[str, str]] = None) -> int:
@@ -442,21 +466,40 @@ def get_bridge_depth(env: Optional[Mapping[str, str]] = None) -> int:
     return depth
 
 
-def assert_dispatch_allowed(env: Optional[Mapping[str, str]] = None) -> int:
-    """Vérifie la profondeur anti-boucle et retourne la profondeur courante si < 1."""
+def assert_dispatch_allowed(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    caller_conversation_id: Optional[str] = None,
+    known_target_conversation_ids: Optional[Iterable[str]] = None,
+) -> int:
+    """Vérifie la garde anti-boucle (GRAVITY_BRIDGE_DEPTH et caller_conversation_id)."""
     depth = get_bridge_depth(env)
     if depth >= 1:
         raise DispatchBlockedError(
             f"Sous-dispatch interdit à GRAVITY_BRIDGE_DEPTH={depth} (anti-boucle fail-closed). "
             "Utilisez reply_thread sans dispatch pour répondre."
         )
+
+    valid_caller = validate_conversation_id(
+        caller_conversation_id, field_name="caller_conversation_id"
+    )
+    if valid_caller is not None and known_target_conversation_ids is not None:
+        known_folded = {
+            str(cid).strip().casefold()
+            for cid in known_target_conversation_ids
+            if isinstance(cid, str) and cid.strip()
+        }
+        if valid_caller.casefold() in known_folded:
+            raise DispatchBlockedError(
+                "Sous-dispatch interdit depuis une conversation ouverte par Gravity Bridge "
+                f"(caller_conversation_id={valid_caller!r}). Utilisez reply_thread(..., dispatch=false)."
+            )
     return depth
 
 
-def assert_mode_approval(effective_mode: str, approved: bool) -> None:
-    """Impose une validation humaine préalable pour le mode accept-edits."""
-    validate_mode(effective_mode)
-    if effective_mode == "accept-edits" and not bool(approved):
+def assert_dispatch_approved(approved: bool) -> None:
+    """Exige le feu vert humain unique (approved=True) avant tout dispatch=True."""
+    if not bool(approved):
         raise DispatchBlockedError(
-            "Le mode 'accept-edits' nécessite approved=True (validation humaine unique requise)."
+            "Feu vert humain unique requis (approved=True) avant tout dispatch=true."
         )

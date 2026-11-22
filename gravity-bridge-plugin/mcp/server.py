@@ -13,26 +13,20 @@ PLUGIN_ROOT = MCP_DIR.parent
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from core.dispatcher import (  # noqa: E402
-    cancel_job,
-    dispatch_job,
-    resolve_agy_executable,
-)
 from core.security import (  # noqa: E402
     NotFoundError,
     ValidationError,
     assert_dispatch_allowed,
-    assert_mode_approval,
-    resolve_effective_mode,
+    assert_dispatch_approved,
     validate_body,
-    validate_effort,
+    validate_conversation_id,
     validate_file_refs,
     validate_int_range,
-    validate_mode,
+    validate_model,
     validate_msg_type,
-    validate_timeout_seconds,
     validate_wait_seconds,
 )
+from core.sidecar_manager import link_workspace_sidecar  # noqa: E402
 from core.store import BridgeStore  # noqa: E402
 
 SERVER_NAME = "gravity-bridge"
@@ -109,16 +103,67 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "type": "string",
                         "description": "Nom d'affichage lisible optionnel.",
                     },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Identifiant de projet Antigravity App optionnel.",
+                    },
                 },
                 "required": ["path"],
+            },
+        },
+        {
+            "name": "link_workspace",
+            "title": "Lier ou délier le micro-sidecar d'un workspace",
+            "description": (
+                "Génère (ou supprime si uninstall=true) le micro-sidecar ~/.gemini/config/sidecars/"
+                "gravity-bridge-<slug>/sidecar.json, crée/met à jour son projet sidecar dédié '<nom> (Bridge)' "
+                "dans ~/.gemini/config/projects/*.json (miroir des dossiers/réglages/permissions du projet utilisateur "
+                "sans jamais attacher le projet utilisateur au sidecar), active config.json (schemaVersion=1) et "
+                "répare tout projet utilisateur précédemment pollué par 'sidecar'."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workspace": {
+                        "type": "string",
+                        "description": "Slug existant ou chemin explicite du workspace à lier.",
+                    },
+                    "uninstall": {
+                        "type": "boolean",
+                        "description": "Supprime le micro-sidecar et son projet dédié '<nom> (Bridge)' si true (défaut false).",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": (
+                            "Identifiant explicite du projet sidecar dédié '<nom> (Bridge)' (optionnel ; généré ou "
+                            "réutilisé automatiquement si omis). Refusé s'il désigne un projet utilisateur existant."
+                        ),
+                    },
+                    "source_project_id": {
+                        "type": "string",
+                        "description": (
+                            "Identifiant optionnel du projet utilisateur Antigravity App dont recopier "
+                            "projectResources, settings et permissionGrants dans le projet dédié '<nom> (Bridge)' "
+                            "(détecté automatiquement par défaut)."
+                        ),
+                    },
+                    "configure_config": {
+                        "type": "boolean",
+                        "description": (
+                            "Met à jour projects/*.json et ~/.gemini/config/config.json (défaut/omission = true, "
+                            "false = écrit uniquement sidecar.json sans toucher ni à config.json ni à projects/)."
+                        ),
+                    },
+                },
+                "required": ["workspace"],
             },
         },
         {
             "name": "list_workspaces",
             "title": "Lister les workspaces enregistrés",
             "description": (
-                "Liste les workspaces enregistrés avec leurs compteurs open_inbox_count, "
-                "unread_count et active_jobs_count."
+                "Liste les workspaces enregistrés avec leur statut sidecar (online/offline/unlinked), "
+                "open_inbox_count, unread_count et active_jobs_count."
             ),
             "inputSchema": {
                 "type": "object",
@@ -129,8 +174,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             "name": "send_message",
             "title": "Envoyer un fil inter-workspaces",
             "description": (
-                "Enregistre un nouveau fil typé (question, handoff, info) et peut instancier "
-                "en tâche de fond une session agy stream-json dans le workspace cible si dispatch=true."
+                "Enregistre un nouveau fil typé (question, handoff, info) et peut créer une conversation "
+                "native dans le projet Antigravity App cible via son micro-sidecar si dispatch=true."
             ),
             "inputSchema": {
                 "type": "object",
@@ -163,33 +208,23 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "approved": {
                         "type": "boolean",
-                        "description": "Indique si le feu vert humain unique a été obtenu.",
+                        "description": "Acte le feu vert humain unique (requis si dispatch=true).",
                     },
                     "dispatch": {
                         "type": "boolean",
-                        "description": "Lance immédiatement le worker agy détaché si true.",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["plan", "accept-edits"],
-                        "description": "Override du mode agy (plan ou accept-edits).",
+                        "description": "Crée la conversation distante via le micro-sidecar cible si true.",
                     },
                     "model": {
                         "type": "string",
-                        "description": "Modèle agy optionnel.",
+                        "description": "Sélecteur de modèle agentapi optionnel (flash_lite, flash, pro ou model_id).",
                     },
-                    "effort": {
+                    "caller_conversation_id": {
                         "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "Effort de raisonnement agy (low, medium, high).",
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": "Timeout d'exécution en secondes (30..900, défaut 300).",
+                        "description": "Conversation ID appelant optionnel pour le garde-fou anti-boucle.",
                     },
                     "wait_seconds": {
                         "type": "integer",
-                        "description": "Attente synchrone bornée en secondes (0..45, défaut 0).",
+                        "description": "Attente synchrone bornée en secondes (0..30, défaut 0).",
                     },
                 },
                 "required": ["from_workspace", "to_workspace", "msg_type", "subject", "body"],
@@ -235,8 +270,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             "name": "read_thread",
             "title": "Lire un fil complet",
             "description": (
-                "Retourne les métadonnées, messages chronologiques, file_refs, dernier job "
-                "et commande de reprise CLI agy --conversation d'un fil."
+                "Retourne les métadonnées, messages chronologiques, file_refs, "
+                "target_conversation_id, target_sidecar_status et dernier job d'un fil."
             ),
             "inputSchema": {
                 "type": "object",
@@ -261,8 +296,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             "name": "reply_thread",
             "title": "Répondre à un fil",
             "description": (
-                "Ajoute une réponse à un fil existant, marque les messages adverses lus "
-                "et peut relancer la session cible (--conversation) si dispatch=true."
+                "Ajoute une réponse à un fil existant, marque les messages adverses lus, "
+                "clôt automatiquement tout job dispatched si émis par la cible et peut relancer la conversation App si dispatch=true."
             ),
             "inputSchema": {
                 "type": "object",
@@ -284,35 +319,33 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "items": {"type": "string"},
                         "description": "Chemins relatifs informatifs de fichiers (max 20).",
                     },
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "Conversation ID de la session cible (filet de sécurité sur réponse retour).",
+                    },
                     "close": {
                         "type": "boolean",
                         "description": "Clôture le fil à done si true (défaut false).",
                     },
                     "dispatch": {
                         "type": "boolean",
-                        "description": "Relance le worker sur le workspace cible si true (sens from -> to uniquement).",
+                        "description": "Relance la conversation cible via agentapi send-message si true (sens from -> to).",
                     },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["plan", "accept-edits"],
-                        "description": "Override du mode agy (sinon hérité du type du fil).",
+                    "approved": {
+                        "type": "boolean",
+                        "description": "Feu vert humain unique requis si dispatch=true.",
                     },
                     "model": {
                         "type": "string",
-                        "description": "Modèle agy optionnel.",
+                        "description": "Sélecteur de modèle agentapi optionnel (en cas de repli new-conversation).",
                     },
-                    "effort": {
+                    "caller_conversation_id": {
                         "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "Effort de raisonnement agy.",
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": "Timeout d'exécution en secondes (30..900, défaut 300).",
+                        "description": "Conversation ID appelant optionnel pour le garde-fou anti-boucle.",
                     },
                     "wait_seconds": {
                         "type": "integer",
-                        "description": "Attente synchrone bornée en secondes (0..45, défaut 0).",
+                        "description": "Attente synchrone bornée en secondes (0..30, défaut 0).",
                     },
                 },
                 "required": ["thread_id", "from_workspace", "body"],
@@ -320,10 +353,10 @@ def _tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "dispatch_thread",
-            "title": "Instancier ou relancer un worker sur un fil",
+            "title": "Créer ou relancer la conversation App d'un fil",
             "description": (
-                "Lance ou reprend explicitement une session agy sur un fil existant "
-                "(permet d'approuver un handoff différé avec approved=true)."
+                "Déclenche ou poursuit explicitement une conversation Antigravity App sur un fil "
+                "existant via le micro-sidecar du projet cible (approved=true et sidecar online requis)."
             ),
             "inputSchema": {
                 "type": "object",
@@ -334,29 +367,19 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "approved": {
                         "type": "boolean",
-                        "description": "Acte le feu vert humain unique avant accept-edits.",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["plan", "accept-edits"],
-                        "description": "Override du mode agy.",
+                        "description": "Acte le feu vert humain unique requis avant dispatch.",
                     },
                     "model": {
                         "type": "string",
-                        "description": "Modèle agy optionnel.",
+                        "description": "Sélecteur de modèle agentapi optionnel.",
                     },
-                    "effort": {
+                    "caller_conversation_id": {
                         "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "Effort de raisonnement agy.",
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": "Timeout d'exécution en secondes (30..900, défaut 300).",
+                        "description": "Conversation ID appelant optionnel pour le garde-fou anti-boucle.",
                     },
                     "wait_seconds": {
                         "type": "integer",
-                        "description": "Attente synchrone bornée en secondes (0..45, défaut 0).",
+                        "description": "Attente synchrone bornée en secondes (0..30, défaut 0).",
                     },
                 },
                 "required": ["thread_id"],
@@ -367,7 +390,7 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             "title": "Gérer l'état d'un fil ou d'un job",
             "description": (
                 "Permet de clôturer/rouvrir un fil, consulter l'état des jobs, "
-                "annuler un job actif ou purger manuellement les vieux fils done."
+                "annuler un job ou purger manuellement les vieux fils done."
             ),
             "inputSchema": {
                 "type": "object",
@@ -400,8 +423,35 @@ def _handle_register_workspace(args: Dict[str, Any]) -> Dict[str, Any]:
     path = _require_str(args, "path")
     slug = _optional_str(args, "slug")
     display_name = _optional_str(args, "display_name")
+    project_id = _optional_str(args, "project_id")
     store = BridgeStore()
-    return _tool_ok(store.register_workspace(path, slug=slug, display_name=display_name))
+    return _tool_ok(
+        store.register_workspace(
+            path, slug=slug, display_name=display_name, project_id=project_id
+        )
+    )
+
+
+def _handle_link_workspace(args: Dict[str, Any]) -> Dict[str, Any]:
+    workspace = _require_str(args, "workspace")
+    uninstall = _as_bool(args.get("uninstall"), "uninstall", False)
+    project_id = _optional_str(args, "project_id")
+    source_project_id = _optional_str(args, "source_project_id")
+    raw_cfg = args.get("configure_config")
+    configure_config: Optional[bool] = (
+        None if raw_cfg is None else _as_bool(raw_cfg, "configure_config", False)
+    )
+    store = BridgeStore()
+    return _tool_ok(
+        link_workspace_sidecar(
+            store,
+            workspace,
+            project_id=project_id,
+            source_project_id=source_project_id,
+            configure_config=configure_config,
+            uninstall=uninstall,
+        )
+    )
 
 
 def _handle_list_workspaces(_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -419,19 +469,23 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
     file_refs = args.get("file_refs")
     approved = _as_bool(args.get("approved"), "approved", False)
     dispatch = _as_bool(args.get("dispatch"), "dispatch", False)
-    mode = validate_mode(_optional_str(args, "mode"))
-    model = _optional_str(args, "model")
-    effort = validate_effort(_optional_str(args, "effort"))
-    timeout_seconds = validate_timeout_seconds(args.get("timeout_seconds"))
+    model = validate_model(_optional_str(args, "model"))
+    caller_conv_id = validate_conversation_id(
+        _optional_str(args, "caller_conversation_id"),
+        field_name="caller_conversation_id",
+    )
     wait_seconds = validate_wait_seconds(args.get("wait_seconds"))
 
-    if dispatch:
-        assert_dispatch_allowed()
-        effective_mode = resolve_effective_mode(msg_type, mode)
-        assert_mode_approval(effective_mode, approved)
-        resolve_agy_executable()
-
     store = BridgeStore()
+    if dispatch:
+        assert_dispatch_approved(approved)
+        assert_dispatch_allowed(
+            caller_conversation_id=caller_conv_id,
+            known_target_conversation_ids=store.list_target_conversation_ids(),
+        )
+        recipient = store.resolve_workspace(to_workspace, allow_auto_register=True)
+        store.assert_sidecar_online(recipient["slug"])
+
     created = store.create_thread(
         from_workspace=from_workspace,
         to_workspace=to_workspace,
@@ -442,17 +496,17 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         approved=approved,
     )
     if dispatch:
-        job = dispatch_job(
-            store,
+        job = store.create_job(
             thread_id=created["thread_id"],
             message_id=created["message_id"],
-            mode=mode,
+            target_workspace=created["to_workspace"],
+            action="new_conversation",
             model=model,
-            effort=effort,
-            timeout_seconds=timeout_seconds,
-            wait_seconds=wait_seconds,
             approve_thread=approved,
+            require_sidecar_online=True,
         )
+        if wait_seconds > 0:
+            job = store.wait_for_job_dispatch(job["id"], wait_seconds=wait_seconds)
         created["job"] = job
     return _tool_ok(created)
 
@@ -509,40 +563,49 @@ def _handle_reply_thread(args: Dict[str, Any]) -> Dict[str, Any]:
     from_workspace = _require_str(args, "from_workspace")
     body = validate_body(_require_str(args, "body"))
     file_refs = validate_file_refs(args.get("file_refs"))
+    conversation_id = validate_conversation_id(
+        _optional_str(args, "conversation_id"), field_name="conversation_id"
+    )
     close = _as_bool(args.get("close"), "close", False)
     dispatch = _as_bool(args.get("dispatch"), "dispatch", False)
-    mode = validate_mode(_optional_str(args, "mode"))
-    model = _optional_str(args, "model")
-    effort = validate_effort(_optional_str(args, "effort"))
-    timeout_seconds = validate_timeout_seconds(args.get("timeout_seconds"))
+    approved = _as_bool(args.get("approved"), "approved", False)
+    model = validate_model(_optional_str(args, "model"))
+    caller_conv_id = validate_conversation_id(
+        _optional_str(args, "caller_conversation_id"),
+        field_name="caller_conversation_id",
+    )
     wait_seconds = validate_wait_seconds(args.get("wait_seconds"))
 
     store = BridgeStore()
+    target_slug: Optional[str] = None
     if dispatch:
         if close:
             raise ValidationError(
                 "Impossible de combiner close=true et dispatch=true dans reply_thread."
             )
-        assert_dispatch_allowed()
+        assert_dispatch_approved(approved)
+        assert_dispatch_allowed(
+            caller_conversation_id=caller_conv_id,
+            known_target_conversation_ids=store.list_target_conversation_ids(),
+        )
         thread = store.read_thread(thread_id, mark_read=False, reconcile=True)
         sender = store.resolve_workspace(from_workspace, allow_auto_register=True)
         if sender["slug"] != thread["from_workspace"]:
             raise ValidationError(
-                "En v0.1, reply_thread(..., dispatch=true) est réservé à l'émetteur initial "
+                "reply_thread(..., dispatch=true) est réservé à l'émetteur initial "
                 f"({thread['from_workspace']!r} -> {thread['to_workspace']!r})."
             )
-        active = [
+        pending = [
             j
             for j in store.list_jobs(thread_id=thread_id, reconcile=False)
-            if j["status"] in ("queued", "running")
+            if j["status"] in ("queued", "claimed")
         ]
-        if active:
+        if pending:
             raise ValidationError(
-                f"Un job actif existe déjà sur le fil {thread_id} ({active[0]['id']})."
+                f"Un job en attente existe déjà sur le fil {thread_id} ({pending[0]['id']})."
             )
-        effective_mode = resolve_effective_mode(thread["msg_type"], mode)
-        assert_mode_approval(effective_mode, thread["approved"])
-        resolve_agy_executable()
+        target_slug = thread["to_workspace"]
+        store.assert_sidecar_online(target_slug)
 
     replied = store.add_reply(
         thread_id=thread_id,
@@ -550,19 +613,19 @@ def _handle_reply_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         body=body,
         file_refs=file_refs,
         close=close,
+        conversation_id=conversation_id,
     )
-    if dispatch:
-        job = dispatch_job(
-            store,
+    if dispatch and target_slug is not None:
+        job = store.create_job(
             thread_id=thread_id,
             message_id=replied["message_id"],
-            mode=mode,
+            target_workspace=target_slug,
             model=model,
-            effort=effort,
-            timeout_seconds=timeout_seconds,
-            wait_seconds=wait_seconds,
-            approve_thread=False,
+            approve_thread=approved,
+            require_sidecar_online=True,
         )
+        if wait_seconds > 0:
+            job = store.wait_for_job_dispatch(job["id"], wait_seconds=wait_seconds)
         replied["job"] = job
     return _tool_ok(replied)
 
@@ -570,13 +633,20 @@ def _handle_reply_thread(args: Dict[str, Any]) -> Dict[str, Any]:
 def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
     thread_id = _require_str(args, "thread_id").strip()
     approved = _as_bool(args.get("approved"), "approved", False)
-    mode = validate_mode(_optional_str(args, "mode"))
-    model = _optional_str(args, "model")
-    effort = validate_effort(_optional_str(args, "effort"))
-    timeout_seconds = validate_timeout_seconds(args.get("timeout_seconds"))
+    model = validate_model(_optional_str(args, "model"))
+    caller_conv_id = validate_conversation_id(
+        _optional_str(args, "caller_conversation_id"),
+        field_name="caller_conversation_id",
+    )
     wait_seconds = validate_wait_seconds(args.get("wait_seconds"))
 
     store = BridgeStore()
+    assert_dispatch_approved(approved)
+    assert_dispatch_allowed(
+        caller_conversation_id=caller_conv_id,
+        known_target_conversation_ids=store.list_target_conversation_ids(),
+    )
+
     thread = store.read_thread(thread_id, mark_read=False, reconcile=True)
     messages = thread.get("messages") or []
     if not messages:
@@ -586,17 +656,16 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
     sender_msgs = [m for m in messages if m.get("sender_workspace") == from_slug]
     target_msg = sender_msgs[-1] if sender_msgs else messages[-1]
 
-    job = dispatch_job(
-        store,
+    job = store.create_job(
         thread_id=thread_id,
         message_id=int(target_msg["id"]),
-        mode=mode,
+        target_workspace=thread["to_workspace"],
         model=model,
-        effort=effort,
-        timeout_seconds=timeout_seconds,
-        wait_seconds=wait_seconds,
         approve_thread=approved,
+        require_sidecar_online=True,
     )
+    if wait_seconds > 0:
+        job = store.wait_for_job_dispatch(job["id"], wait_seconds=wait_seconds)
     return _tool_ok(
         {
             "thread_id": thread_id,
@@ -623,7 +692,7 @@ def _handle_manage_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         return _tool_ok({"count": len(jobs), "jobs": jobs})
     if action == "cancel_job":
         job_id = _require_str(args, "job_id").strip()
-        return _tool_ok(cancel_job(store, job_id))
+        return _tool_ok(store.cancel_job(job_id))
     if action == "prune_done":
         raw_days = args.get("older_than_days")
         days = validate_int_range(
@@ -642,6 +711,7 @@ def _handle_manage_thread(args: Dict[str, Any]) -> Dict[str, Any]:
 
 _TOOL_DISPATCH: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "register_workspace": _handle_register_workspace,
+    "link_workspace": _handle_link_workspace,
     "list_workspaces": _handle_list_workspaces,
     "send_message": _handle_send_message,
     "list_inbox": _handle_list_inbox,
