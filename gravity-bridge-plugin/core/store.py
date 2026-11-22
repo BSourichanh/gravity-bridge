@@ -779,6 +779,32 @@ class BridgeStore:
             "latest_job": _row_to_job(job_row) if job_row is not None else None,
         }
 
+    def get_message(self, message_id: int) -> Dict[str, Any]:
+        """Retourne un message par son identifiant entier."""
+        if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
+            raise ValidationError(f"message_id invalide : {message_id!r}.")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, thread_id, sender_workspace, msg_type, body, file_refs_json, is_read, created_at
+                FROM messages
+                WHERE id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Message introuvable : {message_id}.")
+        return {
+            "id": int(row["id"]),
+            "thread_id": row["thread_id"],
+            "sender_workspace": row["sender_workspace"],
+            "msg_type": row["msg_type"],
+            "body": row["body"],
+            "file_refs": json.loads(row["file_refs_json"] or "[]"),
+            "is_read": bool(row["is_read"]),
+            "created_at": row["created_at"],
+        }
+
     def add_reply(
         self,
         thread_id: str,
@@ -1018,6 +1044,21 @@ class BridgeStore:
                 updated = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return _row_to_job(updated)
 
+    def set_job_pid_if_queued(self, job_id: str, pid: int) -> None:
+        """Enregistre le PID du worker tant que le job est encore queued."""
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            raise ValidationError(f"PID worker invalide : {pid!r}")
+        with self._connect() as conn:
+            with self._transaction(conn, immediate=True):
+                cur = conn.execute(
+                    "UPDATE jobs SET pid = COALESCE(pid, ?) WHERE id = ? AND status = 'queued'",
+                    (pid, job_id),
+                )
+                if cur.rowcount == 0:
+                    exists = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
+                    if exists is None:
+                        raise NotFoundError(f"Job introuvable : {job_id!r}.")
+
     def update_job_child_pid(self, job_id: str, child_pid: int) -> None:
         """Enregistre le PID du sous-processus agy exécuté par le worker."""
         if isinstance(child_pid, bool) or not isinstance(child_pid, int) or child_pid <= 0:
@@ -1064,6 +1105,8 @@ class BridgeStore:
                 row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
                 if row is None:
                     raise NotFoundError(f"Job introuvable : {job_id!r}.")
+                if row["status"] == "cancelled" and status != "cancelled":
+                    return _row_to_job(row)
 
                 conn.execute(
                     """

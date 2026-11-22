@@ -202,7 +202,8 @@ Le serveur implémente JSON-RPC 2.0 sur `stdin`/`stdout` (protocole MCP `2025-06
 ```python
 cmd = [
     agy_exe,
-    "--output-format", "json",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
     "--mode", effective_mode,
     "--print-timeout", f"{timeout_seconds}s",
 ]
@@ -212,10 +213,9 @@ if model:
     cmd.extend(["--model", model])
 if effort:
     cmd.extend(["--effort", effort])
-cmd.append("-p")
 ```
 
-- **Transmission du prompt :** toutes les options précèdent `-p`/`--print`. Le prompt est transmis via **`stdin`** (comportement vérifié au Lot 2 avec `agy.exe`) pour éviter la limite Windows `CreateProcessW` de 32 767 caractères et ne pas exposer le corps du message en ligne de commande ; en repli si `-p` exige un argument positionnel, `prompt_text` est passé après `-p` avec marge de taille sûre.
+- **Transmission du prompt :** vérifié sur `agy.exe 1.1.23` sous Windows (`-p` exige un argument CLI et est soumis à la limite Win32 `CreateProcessW` de 32 767 caractères). Le worker utilise donc le mode natif `--input-format stream-json --output-format stream-json` avec envoi du prompt sur `stdin` en NDJSON : `{"event": "user", "message": {"content": prompt_text}}\n` (immunité complète à la limite 32 Ko et aucune fuite du corps en ligne de commande).
 - **Validation des options :** `effort` limité à `low | medium | high` (`ALLOWED_EFFORTS`).
 - **Règle de mode par défaut :**
   - `threads.msg_type in ("question", "info")` → `--mode plan` *(analyse/lecture seule par défaut)*
@@ -244,13 +244,16 @@ Le worker construit un prompt structuré en UTF-8 garantissant l'autonomie de la
 
 ### 6.4 Capture et persistance du résultat
 
-- Parsing résilient de `stdout` en JSON (`conversation_id`, `status`, `response`, `duration_seconds`, `usage`).
-- En cas de succès (`returncode == 0`, JSON valide et champ `status` absent ou `"SUCCESS"` / `"ok"` insensible à la casse) :
+- Parsing résilient NDJSON de `stdout` (`--output-format stream-json`, avec repli compatible objet JSON unique `--output-format json`) :
+  - `event == "init"` : capture précoce de `conversation_id` (y compris en cas d'interruption ou timeout ultérieur) ;
+  - `event == "step_update"` : accumulation de `step_update.text_delta` en repli ;
+  - `event == "result"` : déballage de l'enveloppe imbriquée `result` (`conversation_id`, `status`, `response`, `error`, `duration_seconds`, `usage`).
+- En cas de succès (`returncode == 0`, JSON/NDJSON valide, champ `status` absent ou `"SUCCESS"` / `"ok"` insensible à la casse et absence d'erreur) :
   - Mise à jour de `threads.target_conversation_id` (si non vide).
   - Caviardage déterministe des secrets (`[REDACTED:<rule_name>]`) dans `response`, puis insertion d'un message `reply` avec `sender_workspace = target_workspace` et `body = response` (tronqué proprement aux frontières UTF-8 si > 32 Ko avec mention explicite + référence au log `~/.gemini/gravity-bridge/logs/<job_id>.log`).
   - Transition du job vers `completed` (`exit_code=0`, `duration_ms`).
 - En cas d'échec (timeout `subprocess.TimeoutExpired`, `returncode != 0`, `status` JSON en erreur ou JSON invalide) :
-  - Transition du job vers `timed_out` ou `failed` avec `exit_code` et `error_summary` (extrait borné de `stderr`/`stdout`, caviardé contre les secrets).
+  - Transition du job vers `timed_out` ou `failed` avec `exit_code`, `target_conversation_id` éventuel (issu de `init`) et `error_summary` (extrait borné de `stderr`/`stdout`, caviardé contre les secrets).
   - Aucun message parasite `reply` vide n'est ajouté ; le fil reste `open` pour diagnostic ou relance via `dispatch_thread`.
 
 ---
