@@ -26,6 +26,7 @@ CONVERSATION_ID_MAX_CHARS = 128
 ALLOWED_THREAD_MSG_TYPES = ("question", "handoff", "info")
 ALLOWED_ALL_MSG_TYPES = ("question", "handoff", "info", "reply")
 ALLOWED_JOB_ACTIONS = ("new_conversation", "send_message")
+ALLOWED_JOB_DIRECTIONS = ("outbound", "callback")
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,48}$")
 SIDECAR_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,79}\Z")
@@ -370,6 +371,17 @@ def validate_job_action(action: str) -> str:
             f"action de job invalide ({action!r}). Valeurs autorisées : {', '.join(ALLOWED_JOB_ACTIONS)}."
         )
     return action
+
+
+def validate_job_direction(direction: str) -> str:
+    """Valide la direction d'un job (outbound ou callback)."""
+    if not isinstance(direction, str):
+        raise ValidationError("direction doit être une chaîne de caractères.")
+    if direction not in ALLOWED_JOB_DIRECTIONS:
+        raise ValidationError(
+            f"direction de job invalide ({direction!r}). Valeurs autorisées : {', '.join(ALLOWED_JOB_DIRECTIONS)}."
+        )
+    return direction
 
 
 def validate_conversation_id(

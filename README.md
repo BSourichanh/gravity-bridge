@@ -1,13 +1,14 @@
-# Gravity Bridge (`v0.1.0`)
+# Gravity Bridge (`v0.2.0`)
 
 Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro dépendance tierce, zéro CLI `agy`, zéro hook permanent) permettant la communication structurée et l'ouverture directe de conversations natives entre projets dans **Antigravity App**, sans jamais déposer de fichiers dans les dépôts suivis.
 
 ## Architecture
 
 - **Contrat module & manifeste (`plugin/`) :** `plugin/plugin.json` (9 champs officiels Antigravity) et `plugin/config/module.json` (`schema_version: 1`, `id: "bridge"`, `storage.subdir: "bridge"`).
-- **Boîte aux lettres centralisée SQLite WAL :** `~/.gemini/gravity/bridge/bridge.db` (résolution `home` > `$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge`). Stocke `workspaces` (avec heartbeat sidecar et `project_id`), `threads`, `messages` et `jobs` avec verrouillage atomique (`BEGIN IMMEDIATE`) et migration idempotente.
+- **Boîte aux lettres centralisée SQLite WAL :** `~/.gemini/gravity/bridge/bridge.db` (résolution `home` > `$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge`). Stocke `workspaces` (avec heartbeat sidecar et `project_id`), `threads` (avec `caller_conversation_id`, `notify_caller`, `callback_dispatched_at`), `messages` et `jobs` (`direction: 'outbound' | 'callback'`) avec verrouillage atomique (`BEGIN IMMEDIATE`) et migration idempotente.
 - **Micro-sidecars natifs Antigravity App (`agentapi`) :** chaque projet cible lié dispose d'un micro-sidecar léger (`~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`) exécutant `scripts/sidecar_relay.py`. Après feu vert humain unique (`approved=True`), le relais crée une vraie conversation dans la barre latérale du projet cible via `agentapi new-conversation` (ou la poursuit via `agentapi send-message`), sans jamais lancer de CLI `agy` isolé ni toucher aux bases internes d'Antigravity.
-- **Isolation & sécurité :** zéro pollution des dépôts cibles, fail-fast si le sidecar cible est `unlinked`/`offline`, anti-boucle (`depth=1`, `caller_conversation_id`, `GRAVITY_BRIDGE_DEPTH`), plafond 32 Ko UTF-8 par message et filtrage heuristique des secrets (refus en entrée utilisateur, caviardage en sortie relais/log).
+- **Callback retour sécurisé (*one-shot*) :** si `notify_caller` est activé (explicitement ou en mode *Auto si prêt* lorsque `caller_conversation_id` est fourni et le sidecar appelant est `online`), la clôture du fil par la cible (`reply_thread(..., close=True, dispatch=False)`) déclenche côté serveur un unique job `direction='callback'` vers `caller_conversation_id` via `agentapi send-message` (zéro repli `new-conversation`, skip propre `skipped_sidecar_offline`/`skipped_sidecar_unlinked` si le sidecar appelant est indisponible).
+- **Isolation & sécurité :** zéro pollution des dépôts cibles, fail-fast si le sidecar cible est `unlinked`/`offline`, anti-boucle (`depth=1`, `caller_conversation_id`, `GRAVITY_BRIDGE_DEPTH`, exclusion des jobs `callback` de `list_target_conversation_ids()`), plafond 32 Ko UTF-8 par message et filtrage heuristique des secrets (refus en entrée utilisateur, caviardage en sortie relais/log).
 
 ## Installation & Liaison des projets
 

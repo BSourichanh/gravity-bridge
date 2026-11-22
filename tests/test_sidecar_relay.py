@@ -279,6 +279,116 @@ class SidecarRelayTestCase(unittest.TestCase):
             "99999999-8888-4777-8666-555555555555",
         )
 
+    def test_callback_job_uses_caller_cwd_target_no_new_conv_fallback_and_no_antiloop_pollution(self) -> None:
+        caller_conv = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+        target_conv = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+
+        self.store.record_sidecar_heartbeat(
+            "architect", sidecar_id="gravity-bridge-architect", pid=os.getpid()
+        )
+        created = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Callback E2E",
+            "Exécuter le lot.",
+            approved=True,
+            caller_conversation_id=caller_conv,
+        )
+        tid = created["thread_id"]
+        out_job = self.store.create_job(tid, created["message_id"], "metrics")
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics")
+        self.store.mark_job_dispatched(out_job["id"], target_conversation_id=target_conv)
+
+        replied = self.store.add_reply(
+            tid,
+            "metrics",
+            "Lot validé et prêt.",
+            file_refs=["plugin/core/store.py"],
+            close=True,
+            conversation_id=target_conv,
+        )
+        self.assertEqual(replied["callback_status"], "queued")
+        cb_job = replied["callback_job"]
+
+        # 1. Exécution nominale sur le sidecar de l'appelant (architect).
+        cb_env = self._env()
+        cb_env["ANTIGRAVITY_PROJECT_ID"] = "proj-arch-1"
+        res_cb = process_one_job(
+            self.store,
+            "architect",
+            sidecar_id="gravity-bridge-architect",
+            agentapi_bin=str(self.fake_agentapi),
+            env=cb_env,
+        )
+        self.assertIsNotNone(res_cb)
+        assert res_cb is not None
+        self.assertEqual(res_cb["status"], "completed")
+        self.assertEqual(res_cb["direction"], "callback")
+        self.assertEqual(res_cb["exit_code"], 0)
+
+        call_cb = json.loads((self.capture_dir / "call_1.json").read_text(encoding="utf-8"))
+        self.assertEqual(call_cb["argv"][0], "send-message")
+        self.assertEqual(call_cb["argv"][-3], "--")
+        self.assertEqual(call_cb["argv"][-2], caller_conv)
+        self.assertEqual(Path(call_cb["cwd"]).resolve(), self.ws_arch.resolve())
+        prompt_sent = call_cb["argv"][-1]
+        self.assertTrue(
+            prompt_sent.startswith(
+                f"[GRAVITY-BRIDGE | CALLBACK | thread={tid} | from=metrics | status=done | depth=1]"
+            )
+        )
+        self.assertIn("read_thread", prompt_sent)
+        self.assertIn("ne pas re-dispatcher automatiquement", prompt_sent.lower())
+
+        # threads.target_conversation_id et l'anti-boucle restent non pollués.
+        detail = self.store.read_thread(tid, reconcile=False)
+        self.assertEqual(detail["target_conversation_id"], target_conv)
+        self.assertNotIn(caller_conv, self.store.list_target_conversation_ids())
+        self.assertFalse(self.store.is_target_conversation_id(caller_conv))
+
+        # 2. En cas d'échec send-message sur callback, AUCUN repli vers new-conversation.
+        self._write_scenario({"fail_send_message": True})
+        created_fail = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Callback Fail",
+            "Exécuter.",
+            approved=True,
+            caller_conversation_id=caller_conv,
+        )
+        rep_fail = self.store.add_reply(
+            created_fail["thread_id"],
+            "metrics",
+            "Clôture échec.",
+            close=True,
+            conversation_id=target_conv,
+        )
+        cb_fail_job = rep_fail["callback_job"]
+        res_fail = process_one_job(
+            self.store,
+            "architect",
+            sidecar_id="gravity-bridge-architect",
+            agentapi_bin=str(self.fake_agentapi),
+            env=cb_env,
+        )
+        self.assertIsNotNone(res_fail)
+        assert res_fail is not None
+        self.assertEqual(res_fail["status"], "failed")
+        self.assertEqual(res_fail["exit_code"], 1)
+        # Un seul appel agentapi (call_2), jamais de call_3 new-conversation.
+        self.assertTrue((self.capture_dir / "call_2.json").is_file())
+        self.assertFalse((self.capture_dir / "call_3.json").exists())
+        call_2 = json.loads((self.capture_dir / "call_2.json").read_text(encoding="utf-8"))
+        self.assertEqual(call_2["argv"][0], "send-message")
+        self.assertEqual(
+            self.store.read_thread(created_fail["thread_id"], reconcile=False)["target_conversation_id"],
+            target_conv,
+        )
+        self.assertNotIn(caller_conv, self.store.list_target_conversation_ids())
+        self.assertEqual(self.store.get_job(cb_fail_job["id"], reconcile=False)["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

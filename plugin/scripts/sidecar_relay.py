@@ -204,6 +204,40 @@ def build_prompt(
     return "\n".join(lines)
 
 
+def build_callback_prompt(
+    thread: Mapping[str, Any],
+    message: Mapping[str, Any],
+) -> str:
+    """Construit le prompt de callback retour one-shot vers caller_conversation_id (depth=1)."""
+    thread_status = str(thread.get("status") or "done")
+    header = (
+        f"[GRAVITY-BRIDGE | CALLBACK | thread={thread['thread_id']} "
+        f"| from={thread['to_workspace']} | status={thread_status} | depth=1]"
+    )
+    lines: List[str] = [
+        header,
+        f"Objet : {thread['subject']}",
+    ]
+    file_refs = message.get("file_refs") or []
+    if file_refs:
+        lines.append(f"Références fichiers : {', '.join(str(r) for r in file_refs)}")
+    lines.extend(
+        [
+            "",
+            str(message.get("body") or "").rstrip(),
+            "",
+            "---",
+            "Rappel callback retour (depth=1) :",
+            f"- Fil clôturé par '{thread['to_workspace']}' ; ne pas re-dispatcher automatiquement (anti-boucle).",
+            (
+                f"- Utiliser read_thread(thread_id=\"{thread['thread_id']}\", "
+                f"reader_workspace=\"{thread['from_workspace']}\") pour consulter le fil complet si besoin."
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
 def build_agentapi_command(
     base_cmd: Sequence[str],
     *,
@@ -452,23 +486,44 @@ def process_one_job(
     try:
         thread = store.read_thread(job["thread_id"], mark_read=False, reconcile=False)
         message = store.get_message(int(job["message_id"]))
+        job_ws = store.get_workspace(job["target_workspace"])
+        job_cwd = job_ws["canonical_path"]
+        job_direction = str(job.get("direction") or "outbound")
+        is_callback = job_direction == "callback"
+
+        title = build_conversation_title(thread)
+        if is_callback:
+            target_conv = job.get("target_conversation_id") or thread.get("caller_conversation_id")
+            if not target_conv:
+                err_msg = "Callback impossible : caller_conversation_id manquant."
+                write_bounded_log(
+                    log_path,
+                    f"job_id={job_id}\ndirection=callback\nerror={err_msg}\n",
+                )
+                return store.complete_job(
+                    job_id,
+                    status="failed",
+                    error_summary=err_msg,
+                )
+            effective_action = "send_message"
+            prompt_text = build_callback_prompt(thread, message)
+        else:
+            target_conv = job.get("target_conversation_id") or thread.get("target_conversation_id")
+            effective_action = job["action"]
+            if effective_action == "send_message" and not target_conv:
+                effective_action = "new_conversation"
+            prompt_text = build_prompt(
+                thread,
+                message,
+                is_followup=(effective_action == "send_message"),
+            )
+
         base_cmd, is_batch = resolve_agentapi_command(agentapi_bin, env=source_env)
 
         data_dir_raw = str(source_env.get("ANTIGRAVITY_EXECUTABLE_DATA_DIR") or "").strip()
         events_dir = (Path(data_dir_raw).parent / "events") if data_dir_raw else None
         events_before = _snapshot_events_dir(events_dir)
 
-        title = build_conversation_title(thread)
-        target_conv = job.get("target_conversation_id") or thread.get("target_conversation_id")
-        effective_action = job["action"]
-        if effective_action == "send_message" and not target_conv:
-            effective_action = "new_conversation"
-
-        prompt_text = build_prompt(
-            thread,
-            message,
-            is_followup=(effective_action == "send_message"),
-        )
         cmd = build_agentapi_command(
             base_cmd,
             action=effective_action,
@@ -479,16 +534,17 @@ def process_one_job(
             is_batch_wrapper=is_batch,
         )
 
-        notes: List[str] = []
+        notes: List[str] = [f"direction={job_direction}"]
         result = _invoke_agentapi(
             cmd,
-            cwd=thread["target_canonical_path"],
+            cwd=job_cwd,
             timeout_s=timeout_seconds,
             env=source_env,
         )
 
         if (
-            effective_action == "send_message"
+            not is_callback
+            and effective_action == "send_message"
             and result["returncode"] != 0
             and not result["timed_out"]
         ):
@@ -508,7 +564,7 @@ def process_one_job(
             )
             result = _invoke_agentapi(
                 cmd,
-                cwd=thread["target_canonical_path"],
+                cwd=job_cwd,
                 timeout_s=timeout_seconds,
                 env=source_env,
             )
@@ -526,6 +582,13 @@ def process_one_job(
         )
 
         if result["returncode"] == 0:
+            if is_callback:
+                return store.complete_job(
+                    job_id,
+                    status="completed",
+                    exit_code=0,
+                    target_conversation_id=target_conv,
+                )
             extracted_conv = extract_conversation_id(str(result.get("stdout") or ""), new_events)
             final_conv = extracted_conv or (
                 target_conv if effective_action == "send_message" else None

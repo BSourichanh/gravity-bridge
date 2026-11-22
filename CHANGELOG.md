@@ -5,6 +5,18 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
+### Added
+- **Callback retour sécurisé *one-shot* (`core/store.py`, `mcp/server.py`, `scripts/sidecar_relay.py`) :**
+  - Schéma SQLite WAL étendu de façon idempotente (`threads.caller_conversation_id`, `threads.notify_caller`, `threads.callback_dispatched_at`, `jobs.direction` dans `'outbound' | 'callback'`).
+  - Paramètre optionnel `notify_caller` sur `send_message` et `dispatch_thread` avec résolution *Auto si prêt* (actif automatiquement si `caller_conversation_id` est fourni et que le sidecar appelant est `online` ; avertissement non bloquant si `notify_caller=True` explicite sur sidecar appelant `offline`/`unlinked` ; préservation des métadonnées existantes dans `dispatch_thread`).
+  - Déclenchement serveur atomique (`BEGIN IMMEDIATE`) dans `reply_thread(..., close=True, dispatch=False)` lorsqu'il est émis par `to_workspace` sur un fil approuvé avec `notify_caller=1`, `caller_conversation_id != target_conversation_id`, `callback_dispatched_at IS NULL` et aucun job en attente ; retour non bloquant `callback_status="skipped_sidecar_offline"` / `"skipped_sidecar_unlinked"` si le sidecar appelant est indisponible.
+  - Exécution dédiée dans `sidecar_relay.py` : résolution de `cwd` depuis `job["target_workspace"]`, résolution stricte de `caller_conversation_id`, préfixe `[GRAVITY-BRIDGE | CALLBACK | thread=<id> | from=<to_workspace> | status=done | depth=1]`, zéro repli `new-conversation` en cas d'échec, et complétion directe via `complete_job` sans appeler `mark_job_dispatched`, sans altérer `threads.target_conversation_id` et sans polluer `list_target_conversation_ids()`.
+
+### Changed
+- Synchronisation SemVer `0.2.0` (`plugin/plugin.json`, `plugin/mcp/server.py`, `README.md`, `plugin/README.md`) et mise à jour du skill `/gravity-bridge` et de `plugin/rules/AGENTS.md`.
+
 ## [0.1.0] - 2026-11-22
 
 ### Added

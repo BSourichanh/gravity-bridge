@@ -11,10 +11,10 @@ description: >-
 ## Règles strictes
 
 1. **Résolution explicite du workspace :** déduire le workspace actif depuis `Active Workspaces` dans votre contexte et passer explicitement son slug ou son chemin absolu (`from_workspace`, `workspace`, `reader_workspace`). Ne jamais supposer un workspace par défaut en contexte multi-racines.
-2. **Feu vert humain unique :** avant tout `send_message(..., dispatch=true)`, `reply_thread(..., dispatch=true)` ou `dispatch_thread`, présenter à l'utilisateur le ou les workspaces cibles, le `msg_type`, la posture attendue (lecture seule pour `question`/`info`, exécution encadrée pour `handoff`), l'objet et les `file_refs`, puis attendre sa confirmation explicite (une validation groupée suffit en multi-cibles) avant de passer `approved=true, dispatch=true`. Passer `caller_conversation_id` s'il est connu dans le contexte.
+2. **Feu vert humain unique :** avant tout `send_message(..., dispatch=true)`, `reply_thread(..., dispatch=true)` ou `dispatch_thread`, présenter à l'utilisateur le ou les workspaces cibles, le `msg_type`, la posture attendue (lecture seule pour `question`/`info`, exécution encadrée pour `handoff`), l'objet et les `file_refs`, puis attendre sa confirmation explicite (une validation groupée suffit en multi-cibles) avant de passer `approved=true, dispatch=true`. Passer `caller_conversation_id` s'il est connu dans le contexte ; ce feu vert unique couvre l'envoi initial (`outbound`) **et** l'éventuel callback retour *one-shot* (`notify_caller`, résolu *Auto si prêt* lorsqu'il est omis avec un `caller_conversation_id` et un sidecar appelant `online`, ou avertissement non bloquant si `notify_caller=true` avec sidecar appelant `offline`/`unlinked`).
 3. **Fail-fast sidecar :** si un dispatch échoue parce que le micro-sidecar cible est `unlinked` ou `offline`, expliquer immédiatement la cause et proposer soit un dépôt passif (`dispatch=false`), soit `/gravity-bridge link <slug>` et l'activation dans Antigravity App.
 4. **Isolation & plafonds :** stockage centralisé exclusivement hors des dépôts cibles (`$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db`) ; ne jamais coller de gros fichiers ni de secrets dans `body` (plafond 32 Ko UTF-8) ; référencer les fichiers concernés via `file_refs` relatifs au dépôt cible (max 20 entrées).
-5. **Anti-boucle :** dans toute conversation ouverte par Gravity Bridge (`depth=1` dans le prompt ou `GRAVITY_BRIDGE_DEPTH >= 1`), tout sous-dispatch est strictement interdit ; répondre uniquement via `reply_thread(..., dispatch=false, conversation_id=...)`.
+5. **Anti-boucle :** dans toute conversation ouverte par Gravity Bridge (`depth=1` dans le prompt ou `GRAVITY_BRIDGE_DEPTH >= 1`), tout sous-dispatch est strictement interdit ; répondre uniquement via `reply_thread(..., dispatch=false, conversation_id=...)`. Lorsqu'un fil est clôturé par la cible (`close=true, dispatch=false`), le serveur MCP déclenche seul l'éventuel callback retour *one-shot* vers `caller_conversation_id` si le sidecar appelant est `online` (sinon `callback_status="skipped_sidecar_*"` sans erreur).
 6. **Réponses synthétiques :** limiter les résumés par défaut à **≤ 12 lignes** en Markdown clair (tableau ou puces).
 
 ## Routage des commandes
@@ -34,7 +34,7 @@ description: >-
 
 ### 4. `/gravity-bridge send <cible> [question|handoff|info] <objet>`
 1. Rédiger un brief autonome concis avec `file_refs` relatifs (sans dupliquer le contenu complet des fichiers).
-2. Si une création de conversation (`dispatch=true`) est demandée, obtenir le feu vert humain unique puis appeler `send_message(..., approved=true, dispatch=true, caller_conversation_id=...)`.
+2. Si une création de conversation (`dispatch=true`) est demandée, obtenir le feu vert humain unique puis appeler `send_message(..., approved=true, dispatch=true, caller_conversation_id=..., notify_caller=...)` (`notify_caller` optionnel, résolu *Auto si prêt* si omis).
 3. Sinon (ou en repli si sidecar hors ligne), déposer passivement dans la boîte aux lettres avec `send_message(..., dispatch=false)`.
 
 ### 5. `/gravity-bridge read <thread_id>`

@@ -512,6 +512,295 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         self.assertTrue(cancelled["structuredContent"]["cancelled"])
         self.assertEqual(cancelled["structuredContent"]["status"], "cancelled")
 
+    def test_one_shot_callback_roundtrip_and_dispatch_thread_intent_preservation(self) -> None:
+        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
+        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
+        self._call_tool("link_workspace", {"workspace": "architect"})
+        self._call_tool("link_workspace", {"workspace": "metrics"})
+
+        store = BridgeStore(home=self.home_dir)
+        store.record_sidecar_heartbeat(
+            "architect",
+            sidecar_id="gravity-bridge-architect",
+            pid=os.getpid(),
+            project_id="proj-arch-1",
+        )
+        store.record_sidecar_heartbeat(
+            "metrics",
+            sidecar_id="gravity-bridge-metrics",
+            pid=os.getpid(),
+            project_id="proj-metrics-1",
+        )
+
+        caller_conv = "11111111-aaaa-4111-8111-111111111111"
+        target_conv = "51832851-9d83-41d4-857d-3c2c2f07f016"
+
+        # 1. send_message avec caller_conversation_id et notify_caller omis -> Auto si prêt = True.
+        send_res = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Lot callback v0.2.0",
+                "body": "Exécuter le lot.",
+                "approved": True,
+                "dispatch": True,
+                "caller_conversation_id": caller_conv,
+            },
+        )
+        self.assertFalse(send_res["isError"], send_res)
+        sc = send_res["structuredContent"]
+        tid = sc["thread_id"]
+        self.assertTrue(sc["notify_caller"])
+        self.assertEqual(sc["caller_conversation_id"], caller_conv)
+
+        # 2. Relais cible traite le job outbound -> target_conv.
+        relay_env = {
+            **os.environ,
+            "FAKE_AGENTAPI_CAPTURE_DIR": str(self.capture_dir),
+            "FAKE_AGENTAPI_SCENARIO": str(self.scenario_file),
+        }
+        self.assertEqual(
+            run_relay_loop(
+                "metrics",
+                home=self.home_dir,
+                once=True,
+                agentapi_bin=str(self.fake_agentapi),
+                env=relay_env,
+            ),
+            0,
+        )
+
+        # 3. L'agent cible (avec GRAVITY_BRIDGE_DEPTH=1) clôture via reply_thread(..., close=True, dispatch=False).
+        rep_close = self._call_tool(
+            "reply_thread",
+            {
+                "thread_id": tid,
+                "from_workspace": "metrics",
+                "body": "Lot terminé avec succès.",
+                "conversation_id": target_conv,
+                "close": True,
+                "dispatch": False,
+            },
+            extra_env={"GRAVITY_BRIDGE_DEPTH": "1"},
+        )
+        self.assertFalse(rep_close["isError"], rep_close)
+        rep_sc = rep_close["structuredContent"]
+        self.assertEqual(rep_sc["status"], "done")
+        self.assertEqual(rep_sc["callback_status"], "queued")
+        cb_job = rep_sc["callback_job"]
+        self.assertEqual(cb_job["direction"], "callback")
+        self.assertEqual(cb_job["target_workspace"], "architect")
+        self.assertEqual(cb_job["target_conversation_id"], caller_conv)
+
+        # 4. Le sidecar appelant traite le callback -> completed sans polluer l'anti-boucle.
+        self.assertEqual(
+            run_relay_loop(
+                "architect",
+                home=self.home_dir,
+                once=True,
+                agentapi_bin=str(self.fake_agentapi),
+                env=relay_env,
+            ),
+            0,
+        )
+        cb_after = self._call_tool(
+            "manage_thread", {"action": "get_job", "job_id": cb_job["id"]}
+        )["structuredContent"]
+        self.assertEqual(cb_after["status"], "completed")
+
+        # 5. La conversation appelante reste autorisée à lancer un autre dispatch, mais pas target_conv.
+        next_send = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "question",
+                "subject": "Fil suivant",
+                "body": "Autre question.",
+                "approved": True,
+                "dispatch": True,
+                "caller_conversation_id": caller_conv,
+            },
+        )
+        self.assertFalse(next_send["isError"], next_send)
+
+        blocked_target = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "metrics",
+                "to_workspace": "architect",
+                "msg_type": "question",
+                "subject": "Boucle interdite",
+                "body": "Doit être bloqué.",
+                "approved": True,
+                "dispatch": True,
+                "caller_conversation_id": target_conv,
+            },
+        )
+        self.assertTrue(blocked_target["isError"])
+        self.assertIn("Sous-dispatch interdit", blocked_target["content"][0]["text"])
+
+        # 6. dispatch_thread préserve caller_conversation_id / notify_caller si omis et permet de les basculer.
+        passive = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Fil passif",
+                "body": "En attente.",
+                "dispatch": False,
+                "caller_conversation_id": caller_conv,
+                "notify_caller": True,
+            },
+        )
+        p_tid = passive["structuredContent"]["thread_id"]
+        disp1 = self._call_tool("dispatch_thread", {"thread_id": p_tid, "approved": True})
+        self.assertFalse(disp1["isError"], disp1)
+        self.assertEqual(disp1["structuredContent"]["caller_conversation_id"], caller_conv)
+        self.assertTrue(disp1["structuredContent"]["notify_caller"])
+
+        # Annulation puis re-dispatch avec notify_caller=False explicite.
+        self._call_tool(
+            "manage_thread",
+            {"action": "cancel_job", "job_id": disp1["structuredContent"]["job"]["id"]},
+        )
+        disp2 = self._call_tool(
+            "dispatch_thread",
+            {"thread_id": p_tid, "approved": True, "notify_caller": False},
+        )
+        self.assertFalse(disp2["isError"], disp2)
+        self.assertFalse(disp2["structuredContent"]["notify_caller"])
+        read_p = self._call_tool("read_thread", {"thread_id": p_tid})["structuredContent"]
+        self.assertFalse(read_p["notify_caller"])
+        self.assertEqual(read_p["caller_conversation_id"], caller_conv)
+
+    def test_notify_caller_warning_when_caller_offline_and_wait_seconds_on_callback(self) -> None:
+        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
+        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
+        store = BridgeStore(home=self.home_dir)
+        store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid()
+        )
+        caller_conv = "22222222-bbbb-4222-8222-222222222222"
+
+        # Caller unlinked + notify_caller=True -> succès avec warning non bloquant.
+        send_warn = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Warning caller unlinked",
+                "body": "Travail.",
+                "approved": True,
+                "dispatch": True,
+                "caller_conversation_id": caller_conv,
+                "notify_caller": True,
+            },
+        )
+        self.assertFalse(send_warn["isError"], send_warn)
+        sc = send_warn["structuredContent"]
+        self.assertTrue(sc["notify_caller"])
+        self.assertTrue(sc.get("warnings"))
+        self.assertIn("link architect", sc["warnings"][0])
+
+        relay_env = {
+            **os.environ,
+            "FAKE_AGENTAPI_CAPTURE_DIR": str(self.capture_dir),
+            "FAKE_AGENTAPI_SCENARIO": str(self.scenario_file),
+        }
+        self.assertEqual(
+            run_relay_loop(
+                "metrics",
+                home=self.home_dir,
+                once=True,
+                agentapi_bin=str(self.fake_agentapi),
+                env=relay_env,
+            ),
+            0,
+        )
+
+        # Clôture quand caller toujours unlinked -> skipped_sidecar_unlinked sans erreur.
+        rep_skip = self._call_tool(
+            "reply_thread",
+            {
+                "thread_id": sc["thread_id"],
+                "from_workspace": "metrics",
+                "body": "Fait.",
+                "close": True,
+                "dispatch": False,
+            },
+        )
+        self.assertFalse(rep_skip["isError"], rep_skip)
+        self.assertEqual(rep_skip["structuredContent"]["callback_status"], "skipped_sidecar_unlinked")
+
+        # wait_seconds > 0 sur reply_thread attend la complétion du callback et retourne callback_status="dispatched".
+        store.record_sidecar_heartbeat(
+            "architect", sidecar_id="gravity-bridge-architect", pid=os.getpid()
+        )
+        t2 = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Wait callback",
+                "body": "Travail.",
+                "approved": True,
+                "dispatch": False,
+                "caller_conversation_id": caller_conv,
+                "notify_caller": True,
+            },
+        )["structuredContent"]["thread_id"]
+
+        # Démarre un thread d'arrière-plan qui traite le job callback pendant wait_seconds.
+        import threading
+
+        def _bg_relay() -> None:
+            import time
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if (
+                    run_relay_loop(
+                        "architect",
+                        home=self.home_dir,
+                        once=True,
+                        agentapi_bin=str(self.fake_agentapi),
+                        env=relay_env,
+                    )
+                    == 0
+                ):
+                    jobs = store.list_jobs(thread_id=t2, reconcile=False)
+                    if jobs and jobs[0]["status"] == "completed":
+                        return
+                time.sleep(0.1)
+
+        worker = threading.Thread(target=_bg_relay, daemon=True)
+        worker.start()
+        try:
+            rep_wait = self._call_tool(
+                "reply_thread",
+                {
+                    "thread_id": t2,
+                    "from_workspace": "metrics",
+                    "body": "Fait avec wait.",
+                    "close": True,
+                    "dispatch": False,
+                    "wait_seconds": 5,
+                },
+            )
+        finally:
+            worker.join(timeout=5.0)
+
+        self.assertFalse(rep_wait["isError"], rep_wait)
+        w_sc = rep_wait["structuredContent"]
+        self.assertEqual(w_sc["callback_status"], "dispatched")
+        self.assertEqual(w_sc["callback_job"]["status"], "completed")
+
     def test_link_workspace_creates_dedicated_project_and_repairs_polluted_user_project(self) -> None:
         self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
         projects_dir = self.config_path.parent / "projects"

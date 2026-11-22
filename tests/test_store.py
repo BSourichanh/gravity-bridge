@@ -168,6 +168,84 @@ class TestSchemaMigrationAndWorkspaces(StoreTestCase):
         self.assertEqual(ws_b["sidecar_status"], "unlinked")
         self.assertIsNone(ws_b["project_id"])
 
+    def test_migrates_v010_schema_to_v020_callback_columns_idempotently(self) -> None:
+        v010_home = self.root / "v010-home"
+        v010_home.mkdir()
+        v010_db = v010_home / "bridge.db"
+        conn = sqlite3.connect(str(v010_db))
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE workspaces (
+                    slug TEXT PRIMARY KEY,
+                    canonical_path TEXT UNIQUE NOT NULL,
+                    display_name TEXT NOT NULL,
+                    sidecar_id TEXT,
+                    sidecar_pid INTEGER,
+                    sidecar_last_seen_at TEXT,
+                    project_id TEXT,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
+                CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    from_workspace TEXT NOT NULL REFERENCES workspaces(slug),
+                    to_workspace TEXT NOT NULL REFERENCES workspaces(slug),
+                    msg_type TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    approved INTEGER NOT NULL DEFAULT 0,
+                    target_conversation_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                    sender_workspace TEXT NOT NULL REFERENCES workspaces(slug),
+                    msg_type TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    file_refs_json TEXT NOT NULL DEFAULT '[]',
+                    is_read INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+                    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    target_workspace TEXT NOT NULL REFERENCES workspaces(slug),
+                    action TEXT NOT NULL,
+                    model TEXT,
+                    sidecar_id TEXT,
+                    target_conversation_id TEXT,
+                    status TEXT NOT NULL,
+                    exit_code INTEGER,
+                    error_summary TEXT,
+                    claimed_at TEXT,
+                    dispatched_at TEXT,
+                    finished_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO workspaces VALUES ('a', '/tmp/a', 'a', NULL, NULL, NULL, NULL, '2026-11-22T10:00:00Z', '2026-11-22T10:00:00Z');
+                INSERT INTO workspaces VALUES ('b', '/tmp/b', 'b', NULL, NULL, NULL, NULL, '2026-11-22T10:00:00Z', '2026-11-22T10:00:00Z');
+                INSERT INTO threads VALUES ('thr-v010', 'a', 'b', 'handoff', 'V010', 'open', 1, 'conv-tgt-1', '2026-11-22T10:00:00Z', '2026-11-22T10:00:00Z');
+                INSERT INTO messages VALUES (1, 'thr-v010', 'a', 'handoff', 'Body', '[]', 0, '2026-11-22T10:00:00Z');
+                INSERT INTO jobs VALUES ('job-v010', 'thr-v010', 1, 'b', 'new_conversation', NULL, NULL, 'conv-tgt-1', 'completed', 0, NULL, NULL, '2026-11-22T10:00:01Z', '2026-11-22T10:00:05Z', '2026-11-22T10:00:00Z');
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        store_v020 = BridgeStore(home=v010_home)
+        store_v020_again = BridgeStore(home=v010_home)
+        detail = store_v020_again.read_thread("thr-v010", reconcile=False)
+        self.assertIsNone(detail["caller_conversation_id"])
+        self.assertFalse(detail["notify_caller"])
+        self.assertIsNone(detail["callback_dispatched_at"])
+        job = store_v020_again.get_job("job-v010", reconcile=False)
+        self.assertEqual(job["direction"], "outbound")
+
     def test_resolve_bridge_home_precedence_chain(self) -> None:
         explicit = self.root / "explicit-bridge"
         custom_bridge = self.root / "env-bridge"
@@ -388,6 +466,193 @@ class TestThreadsInboxAndReplies(StoreTestCase):
         detail = self.store.read_thread(tid, reconcile=False)
         self.assertEqual(detail["target_conversation_id"], conv_override)
         self.assertEqual(detail["target_project_id"], "proj-m")
+
+    def test_callback_notify_caller_resolution_one_shot_guards_and_non_pollution(self) -> None:
+        now = datetime.now(timezone.utc)
+        caller_conv = "11111111-1111-4111-8111-111111111111"
+        target_conv = "22222222-2222-4222-8222-222222222222"
+
+        # 1. Auto si prêt : caller unlinked -> notify_caller=False si omis.
+        t_unlinked = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Auto unlinked",
+            "Body",
+            approved=True,
+            caller_conversation_id=caller_conv,
+            now=now,
+        )
+        self.assertFalse(t_unlinked["notify_caller"])
+        self.assertEqual(t_unlinked["caller_conversation_id"], caller_conv)
+
+        # 2. notify_caller=True explicite avec caller unlinked -> enregistré + avertissement non bloquant.
+        t_explicit_unlinked = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Explicit unlinked",
+            "Body",
+            approved=True,
+            caller_conversation_id=caller_conv,
+            notify_caller=True,
+            now=now,
+        )
+        self.assertTrue(t_explicit_unlinked["notify_caller"])
+        self.assertTrue(t_explicit_unlinked.get("warnings"))
+        self.assertIn("unlinked", t_explicit_unlinked["warnings"][0])
+
+        # Clôture quand caller unlinked -> skipped_sidecar_unlinked sans erreur.
+        rep_unlinked = self.store.add_reply(
+            t_explicit_unlinked["thread_id"],
+            "metrics",
+            "Terminé.",
+            close=True,
+            conversation_id=target_conv,
+            now=now,
+        )
+        self.assertEqual(rep_unlinked["status"], "done")
+        self.assertEqual(rep_unlinked["callback_status"], "skipped_sidecar_unlinked")
+        self.assertNotIn("callback_job", rep_unlinked)
+        self.assertIsNone(
+            self.store.read_thread(t_explicit_unlinked["thread_id"], reconcile=False)[
+                "callback_dispatched_at"
+            ]
+        )
+
+        # 3. Caller lié mais offline -> skipped_sidecar_offline sans erreur.
+        self.store.set_workspace_sidecar("architect", "gravity-bridge-architect")
+        rep_offline = self.store.add_reply(
+            t_explicit_unlinked["thread_id"],
+            "metrics",
+            "Deuxième clôture.",
+            close=True,
+            now=now,
+        )
+        self.assertEqual(rep_offline["callback_status"], "skipped_sidecar_offline")
+
+        # 4. Caller online -> Auto si prêt active notify_caller=True.
+        self.store.record_sidecar_heartbeat(
+            "architect",
+            sidecar_id="gravity-bridge-architect",
+            pid=os.getpid(),
+            now=now,
+        )
+        self.store.record_sidecar_heartbeat(
+            "metrics",
+            sidecar_id="gravity-bridge-metrics",
+            pid=os.getpid(),
+            now=now,
+        )
+        t_auto = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Auto ready",
+            "Body",
+            approved=True,
+            caller_conversation_id=caller_conv,
+            now=now,
+        )
+        self.assertTrue(t_auto["notify_caller"])
+        self.assertNotIn("warnings", t_auto)
+
+        # notify_caller=False explicite force 0 malgré sidecar online.
+        t_disabled = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Disabled",
+            "Body",
+            approved=True,
+            caller_conversation_id=caller_conv,
+            notify_caller=False,
+            now=now,
+        )
+        self.assertFalse(t_disabled["notify_caller"])
+
+        # Garde-fous : close=False, expéditeur!=to_workspace, same_conv, approved=False -> aucun callback.
+        rep_open = self.store.add_reply(
+            t_auto["thread_id"], "metrics", "En cours.", close=False, conversation_id=target_conv, now=now
+        )
+        self.assertNotIn("callback_status", rep_open)
+        rep_from_caller = self.store.add_reply(
+            t_auto["thread_id"], "architect", "Précision.", close=True, now=now
+        )
+        self.assertNotIn("callback_status", rep_from_caller)
+
+        same_conv_id = "33333333-3333-4333-8333-333333333333"
+        t_same = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Same conv",
+            "Body",
+            approved=True,
+            caller_conversation_id=same_conv_id,
+            notify_caller=True,
+            now=now,
+        )
+        rep_same = self.store.add_reply(
+            t_same["thread_id"],
+            "metrics",
+            "Même conv.",
+            close=True,
+            conversation_id=same_conv_id,
+            now=now,
+        )
+        self.assertNotIn("callback_status", rep_same)
+
+        # Déclenchement one-shot nominal sur t_auto après job outbound dispatched.
+        out_job = self.store.create_job(t_auto["thread_id"], t_auto["message_id"], "metrics", now=now)
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.store.mark_job_dispatched(out_job["id"], target_conversation_id=target_conv, now=now)
+
+        rep_done = self.store.add_reply(
+            t_auto["thread_id"],
+            "metrics",
+            "Lot terminé.",
+            close=True,
+            conversation_id=target_conv,
+            now=now,
+        )
+        self.assertEqual(rep_done["completed_job_ids"], [out_job["id"]])
+        self.assertEqual(rep_done["callback_status"], "queued")
+        cb_job = rep_done["callback_job"]
+        self.assertEqual(cb_job["direction"], "callback")
+        self.assertEqual(cb_job["action"], "send_message")
+        self.assertEqual(cb_job["target_workspace"], "architect")
+        self.assertEqual(cb_job["target_conversation_id"], caller_conv)
+
+        # Anti-rejeu : second reply_thread(..., close=True) ne crée jamais un second callback.
+        rep_replay = self.store.add_reply(
+            t_auto["thread_id"], "metrics", "Rejeu.", close=True, now=now
+        )
+        self.assertNotIn("callback_job", rep_replay)
+        self.assertNotIn("callback_status", rep_replay)
+
+        # Finalisation callback : mark_job_dispatched interdit, complete_job ne pollue ni target_conversation_id ni anti-boucle.
+        claimed_cb = self.store.claim_next_job(
+            "architect", sidecar_id="gravity-bridge-architect", now=now
+        )
+        self.assertIsNotNone(claimed_cb)
+        with self.assertRaises(DispatchBlockedError):
+            self.store.mark_job_dispatched(cb_job["id"], target_conversation_id=caller_conv, now=now)
+
+        done_cb = self.store.complete_job(
+            cb_job["id"],
+            status="completed",
+            exit_code=0,
+            target_conversation_id=caller_conv,
+            now=now,
+        )
+        self.assertEqual(done_cb["status"], "completed")
+        detail_after = self.store.read_thread(t_auto["thread_id"], reconcile=False)
+        self.assertEqual(detail_after["target_conversation_id"], target_conv)
+        self.assertIsNotNone(detail_after["callback_dispatched_at"])
+        self.assertFalse(self.store.is_target_conversation_id(caller_conv))
+        self.assertNotIn(caller_conv, self.store.list_target_conversation_ids())
+        self.assertTrue(self.store.is_target_conversation_id(target_conv))
 
 
 class TestJobsAndReconciliation(StoreTestCase):

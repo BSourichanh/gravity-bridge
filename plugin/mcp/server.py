@@ -27,10 +27,10 @@ from core.security import (  # noqa: E402
     validate_wait_seconds,
 )
 from core.sidecar_manager import link_workspace_sidecar  # noqa: E402
-from core.store import BridgeStore  # noqa: E402
+from core.store import BridgeStore, resolve_notify_caller  # noqa: E402
 
 SERVER_NAME = "gravity-bridge"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 
@@ -59,6 +59,15 @@ def _as_bool(val: Any, name: str, default: bool) -> bool:
         return default
     if not isinstance(val, bool):
         raise ValidationError(f"Le paramètre '{name}' doit être un booléen.")
+    return val
+
+
+def _optional_bool(args: Dict[str, Any], key: str) -> Optional[bool]:
+    val = args.get(key)
+    if val is None:
+        return None
+    if not isinstance(val, bool):
+        raise ValidationError(f"Le paramètre '{key}' doit être un booléen.")
     return val
 
 
@@ -220,7 +229,16 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "caller_conversation_id": {
                         "type": "string",
-                        "description": "Conversation ID appelant optionnel pour le garde-fou anti-boucle.",
+                        "description": (
+                            "Conversation ID appelant optionnel (anti-boucle et cible du callback retour one-shot)."
+                        ),
+                    },
+                    "notify_caller": {
+                        "type": "boolean",
+                        "description": (
+                            "Active ou désactive le callback retour one-shot vers caller_conversation_id à la clôture "
+                            "(omis = auto si caller_conversation_id fourni et sidecar appelant online)."
+                        ),
                     },
                     "wait_seconds": {
                         "type": "integer",
@@ -297,7 +315,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             "title": "Répondre à un fil",
             "description": (
                 "Ajoute une réponse à un fil existant, marque les messages adverses lus, "
-                "clôt automatiquement tout job dispatched si émis par la cible et peut relancer la conversation App si dispatch=true."
+                "clôt automatiquement tout job dispatched si émis par la cible, déclenche l'éventuel callback "
+                "retour one-shot si close=true et peut relancer la conversation App si dispatch=true."
             ),
             "inputSchema": {
                 "type": "object",
@@ -375,7 +394,16 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "caller_conversation_id": {
                         "type": "string",
-                        "description": "Conversation ID appelant optionnel pour le garde-fou anti-boucle.",
+                        "description": (
+                            "Conversation ID appelant optionnel (anti-boucle et cible du callback retour one-shot)."
+                        ),
+                    },
+                    "notify_caller": {
+                        "type": "boolean",
+                        "description": (
+                            "Active ou désactive le callback retour one-shot vers caller_conversation_id à la clôture "
+                            "(omis = préserve l'existant ou auto si prêt)."
+                        ),
                     },
                     "wait_seconds": {
                         "type": "integer",
@@ -437,10 +465,7 @@ def _handle_link_workspace(args: Dict[str, Any]) -> Dict[str, Any]:
     uninstall = _as_bool(args.get("uninstall"), "uninstall", False)
     project_id = _optional_str(args, "project_id")
     source_project_id = _optional_str(args, "source_project_id")
-    raw_cfg = args.get("configure_config")
-    configure_config: Optional[bool] = (
-        None if raw_cfg is None else _as_bool(raw_cfg, "configure_config", False)
-    )
+    configure_config = _optional_bool(args, "configure_config")
     store = BridgeStore()
     return _tool_ok(
         link_workspace_sidecar(
@@ -474,6 +499,7 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         _optional_str(args, "caller_conversation_id"),
         field_name="caller_conversation_id",
     )
+    notify_caller = _optional_bool(args, "notify_caller")
     wait_seconds = validate_wait_seconds(args.get("wait_seconds"))
 
     store = BridgeStore()
@@ -494,6 +520,8 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         body=body,
         file_refs=file_refs,
         approved=approved,
+        caller_conversation_id=caller_conv_id,
+        notify_caller=notify_caller,
     )
     if dispatch:
         job = store.create_job(
@@ -627,6 +655,17 @@ def _handle_reply_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         if wait_seconds > 0:
             job = store.wait_for_job_dispatch(job["id"], wait_seconds=wait_seconds)
         replied["job"] = job
+    elif wait_seconds > 0 and replied.get("callback_job"):
+        cb_job = store.wait_for_job_dispatch(
+            replied["callback_job"]["id"], wait_seconds=wait_seconds
+        )
+        replied["callback_job"] = cb_job
+        if cb_job["status"] in ("dispatched", "completed"):
+            replied["callback_status"] = "dispatched"
+        elif cb_job["status"] == "failed":
+            replied["callback_status"] = "failed"
+        else:
+            replied["callback_status"] = cb_job["status"]
     return _tool_ok(replied)
 
 
@@ -638,6 +677,7 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         _optional_str(args, "caller_conversation_id"),
         field_name="caller_conversation_id",
     )
+    notify_caller = _optional_bool(args, "notify_caller")
     wait_seconds = validate_wait_seconds(args.get("wait_seconds"))
 
     store = BridgeStore()
@@ -656,6 +696,17 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
     sender_msgs = [m for m in messages if m.get("sender_workspace") == from_slug]
     target_msg = sender_msgs[-1] if sender_msgs else messages[-1]
 
+    caller_ws = store.get_workspace(from_slug)
+    effective_caller = (
+        caller_conv_id if caller_conv_id is not None else thread.get("caller_conversation_id")
+    )
+    resolved_notify, warning = resolve_notify_caller(
+        caller_ws,
+        caller_conversation_id=effective_caller,
+        notify_caller=notify_caller,
+        existing_notify=bool(thread.get("notify_caller")),
+    )
+
     job = store.create_job(
         thread_id=thread_id,
         message_id=int(target_msg["id"]),
@@ -663,16 +714,22 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         model=model,
         approve_thread=approved,
         require_sidecar_online=True,
+        caller_conversation_id=caller_conv_id,
+        notify_caller=notify_caller,
+        sync_callback=True,
     )
     if wait_seconds > 0:
         job = store.wait_for_job_dispatch(job["id"], wait_seconds=wait_seconds)
-    return _tool_ok(
-        {
-            "thread_id": thread_id,
-            "message_id": int(target_msg["id"]),
-            "job": job,
-        }
-    )
+    result: Dict[str, Any] = {
+        "thread_id": thread_id,
+        "message_id": int(target_msg["id"]),
+        "caller_conversation_id": effective_caller,
+        "notify_caller": resolved_notify,
+        "job": job,
+    }
+    if warning:
+        result["warnings"] = [warning]
+    return _tool_ok(result)
 
 
 def _handle_manage_thread(args: Dict[str, Any]) -> Dict[str, Any]:
