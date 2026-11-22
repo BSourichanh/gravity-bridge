@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "gravity-bridge-plugin"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
@@ -485,6 +485,38 @@ class SidecarManagerTestCase(unittest.TestCase):
                 projects_dir=self.projects_dir,
                 source_project_id="bridge-custom-42",
             )
+
+    def test_sidecar_env_omits_home_only_for_default_gravity_bridge_dir(self) -> None:
+        fake_home = self.root / "fake-home"
+        expected_default = (fake_home / ".gemini" / "gravity" / "bridge").resolve()
+        with mock.patch.object(Path, "home", return_value=fake_home), mock.patch.dict(
+            os.environ, {"GRAVITY_BRIDGE_HOME": "", "GRAVITY_HOME": ""}, clear=False
+        ):
+            default_store = BridgeStore()
+            self.assertEqual(default_store.home_dir, expected_default)
+            res_default = sm_mod.link_workspace_sidecar(
+                default_store,
+                str(self.ws_target),
+                sidecars_dir=self.sidecars_dir,
+                config_path=self.config_path,
+                projects_dir=self.projects_dir,
+            )
+        sc_default = json.loads(
+            Path(res_default["sidecar_json_path"]).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("GRAVITY_BRIDGE_HOME", sc_default["env"])
+
+        custom_sc = sm_mod.link_workspace_sidecar(
+            self.store,
+            str(self.ws_target),
+            sidecars_dir=self.sidecars_dir,
+            config_path=self.config_path,
+            projects_dir=self.projects_dir,
+        )
+        sc_custom = json.loads(
+            Path(custom_sc["sidecar_json_path"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(sc_custom["env"]["GRAVITY_BRIDGE_HOME"], str(self.store.home_dir))
 
 
 if __name__ == "__main__":

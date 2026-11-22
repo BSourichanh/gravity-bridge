@@ -1,6 +1,6 @@
 # Plugin Gravity Bridge
 
-Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CLI `agy`, zéro hook permanent) assurant la communication inter-projets via une boîte aux lettres SQLite centralisée (`~/.gemini/gravity-bridge/bridge.db`) et des micro-sidecars `agentapi` ouvrant de vraies conversations natives dans **Antigravity App**.
+Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CLI `agy`, zéro hook permanent, contrat `config/module.json` `id: "bridge"`) assurant la communication inter-projets via une boîte aux lettres SQLite centralisée (`$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db`) et des micro-sidecars `agentapi` ouvrant de vraies conversations natives dans **Antigravity App**.
 
 ## Commandes `/gravity-bridge`
 

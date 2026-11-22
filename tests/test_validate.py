@@ -1,4 +1,4 @@
-"""Tests unitaires du validateur strict gravity-bridge-plugin/scripts/validate.py."""
+"""Tests unitaires du validateur strict plugin/scripts/validate.py."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_ROOT = REPO_ROOT / "gravity-bridge-plugin"
+PLUGIN_ROOT = REPO_ROOT / "plugin"
 SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -167,6 +167,42 @@ class ValidateTestCase(unittest.TestCase):
             (PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8"),
             repo_mcp_before,
         )
+
+    def test_detects_invalid_or_missing_module_contract(self) -> None:
+        copy_missing = self._copy_plugin("missing-module")
+        (copy_missing / "config" / "module.json").unlink()
+        rep_missing = validate_mod.Report()
+        validate_mod.validate_plugin(copy_missing, rep_missing)
+        self.assertTrue(
+            any("config/module.json introuvable" in e for e in rep_missing.errors),
+            rep_missing.errors,
+        )
+
+        copy_bad = self._copy_plugin("bad-module")
+        mod_path = copy_bad / "config" / "module.json"
+        bad_payload = json.loads(mod_path.read_text(encoding="utf-8"))
+        bad_payload["schema_version"] = 2
+        bad_payload["id"] = "other"
+        bad_payload["plugin_name"] = "wrong-plugin"
+        bad_payload["storage"] = {"subdir": "wrong", "env_override": "bad_env"}
+        bad_payload["commands"] = ["no-slash"]
+        bad_payload["ui"] = {"mode": "", "target": ""}
+        bad_payload["signals"] = {"produces": [""], "consumes": "invalid"}
+        mod_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(bad_payload).encode("utf-8"))
+
+        rep_bad = validate_mod.Report()
+        validate_mod.validate_plugin(copy_bad, rep_bad)
+        joined = "\n".join(rep_bad.errors)
+        self.assertIn("BOM UTF-8", joined)
+        self.assertIn("schema_version", joined)
+        self.assertIn("'id'", joined)
+        self.assertIn("plugin_name", joined)
+        self.assertIn("storage.subdir", joined)
+        self.assertIn("storage.env_override", joined)
+        self.assertIn("commands", joined)
+        self.assertIn("ui.mode", joined)
+        self.assertIn("signals.produces", joined)
+        self.assertIn("signals.consumes", joined)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from urllib.parse import quote, unquote, urlparse
 import uuid
 
 from core.security import ValidationError, validate_sidecar_id, validate_slug
-from core.store import BridgeStore
+from core.store import BridgeStore, default_bridge_home
 
 RELAY_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "sidecar_relay.py"
 BRIDGE_PROJECT_SUFFIX = " (Bridge)"
@@ -707,7 +707,7 @@ def link_workspace_sidecar(
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
     }
-    default_home = (Path.home() / ".gemini" / "gravity-bridge").resolve()
+    default_home = default_bridge_home()
     if store.home_dir != default_home:
         env_map["GRAVITY_BRIDGE_HOME"] = str(store.home_dir)
 

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "gravity-bridge-plugin"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 

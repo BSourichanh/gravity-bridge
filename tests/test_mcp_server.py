@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "gravity-bridge-plugin"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 SERVER_SCRIPT = PLUGIN_ROOT / "mcp" / "server.py"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
@@ -78,6 +78,7 @@ class McpStdioTestCase(unittest.TestCase):
     ) -> list[dict]:
         env = dict(os.environ)
         env.pop("GRAVITY_BRIDGE_DEPTH", None)
+        env.pop("GRAVITY_HOME", None)
         env.pop("GRAVITY_BRIDGE_ANTIGRAVITY_PROJECTS_DIR", None)
         env["GRAVITY_BRIDGE_HOME"] = str(self.home_dir)
         env["GRAVITY_BRIDGE_SIDECARS_DIR"] = str(self.sidecars_dir)

@@ -14,7 +14,7 @@ import tempfile
 from typing import List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_SOURCE_DIR = REPO_ROOT / "gravity-bridge-plugin"
+PLUGIN_SOURCE = REPO_ROOT / "plugin"
 
 
 def default_target_dir() -> Path:
@@ -96,7 +96,7 @@ def install_plugin(
     dry_run: bool = False,
     run_validate: bool = True,
 ) -> int:
-    """Installe gravity-bridge-plugin vers target, adapte python3 sur la copie et valide."""
+    """Installe plugin/ vers target, adapte python3 sur la copie et valide."""
     src = source.expanduser().resolve()
     dst = target.expanduser().resolve()
 
@@ -153,7 +153,7 @@ def install_plugin(
         _sync_staged_into_target(staged, dst)
 
     print(f"[OK] Plugin Gravity Bridge installé dans {dst}")
-    print("[INFO] Stockage boîte aux lettres inchangé (~/.gemini/gravity-bridge/bridge.db).")
+    print("[INFO] Stockage boîte aux lettres inchangé (~/.gemini/gravity/bridge/bridge.db).")
     return 0
 
 
@@ -169,7 +169,7 @@ def uninstall_plugin(target: Path, *, dry_run: bool = False) -> int:
         return 0
 
     shutil.rmtree(dst)
-    print(f"[OK] Plugin désinstallé de {dst} (données ~/.gemini/gravity-bridge/ préservées).")
+    print(f"[OK] Plugin désinstallé de {dst} (données ~/.gemini/gravity/bridge/ préservées).")
     return 0
 
 
@@ -334,8 +334,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--source",
         type=Path,
-        default=DEFAULT_SOURCE_DIR,
-        help="Dossier source gravity-bridge-plugin (défaut : ./gravity-bridge-plugin).",
+        default=PLUGIN_SOURCE,
+        help="Dossier source du plugin (défaut : ./plugin).",
     )
     parser.add_argument(
         "--target",
@@ -410,7 +410,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--home",
         type=Path,
         default=None,
-        help="Répertoire GRAVITY_BRIDGE_HOME personnalisé.",
+        help="Répertoire de stockage personnalisé (défaut : $GRAVITY_BRIDGE_HOME > $GRAVITY_HOME/bridge > ~/.gemini/gravity/bridge).",
     )
     parser.add_argument(
         "--dry-run",

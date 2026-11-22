@@ -143,14 +143,22 @@ def _get_kernel32():
     return _KERNEL32
 
 
+def default_bridge_home() -> Path:
+    """Retourne le dossier de stockage centralisé par défaut (~/.gemini/gravity/bridge)."""
+    return (Path.home() / ".gemini" / "gravity" / "bridge").resolve()
+
+
 def resolve_bridge_home(home: Optional[Path] = None) -> Path:
-    """Résout le dossier de stockage centralisé ($GRAVITY_BRIDGE_HOME ou ~/.gemini/gravity-bridge)."""
+    """Résout le dossier centralisé (home > $GRAVITY_BRIDGE_HOME > $GRAVITY_HOME/bridge > ~/.gemini/gravity/bridge)."""
     if home is not None:
         return Path(home).expanduser().resolve()
     env_home = os.environ.get("GRAVITY_BRIDGE_HOME", "").strip()
     if env_home:
         return Path(env_home).expanduser().resolve()
-    return (Path.home() / ".gemini" / "gravity-bridge").resolve()
+    gravity_home = os.environ.get("GRAVITY_HOME", "").strip()
+    if gravity_home:
+        return (Path(gravity_home).expanduser() / "bridge").resolve()
+    return default_bridge_home()
 
 
 def utc_now_iso(now: Optional[datetime] = None) -> str:
