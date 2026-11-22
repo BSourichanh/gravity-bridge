@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "bridge",
+  "plugin_name": "gravity-bridge",
+  "role": "Communication inter-projets (boite SQLite WAL) et conversations natives App via micro-sidecars agentapi",
+  "storage": {
+    "subdir": "bridge",
+    "env_override": "GRAVITY_BRIDGE_HOME"
+  },
+  "commands": [
+    "/gravity-bridge"
+  ],
+  "capabilities": [
+    "inter-project-mailbox",
+    "sidecar-dispatch",
+    "mcp-bridge"
+  ],
+  "ui": {
+    "mode": "none",
+    "target": "gravity"
+  },
+  "signals": {
+    "produces": [
+      "bridge-threads"
+    ],
+    "consumes": []
+  }
+}

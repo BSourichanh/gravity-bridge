@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_ROOT = REPO_ROOT / "gravity-bridge-plugin"
+PLUGIN_ROOT = REPO_ROOT / "plugin"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 if str(PLUGIN_ROOT / "scripts") not in sys.path:
@@ -37,6 +37,7 @@ class InstallTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_install_reinstall_and_uninstall_preserve_repo_source(self) -> None:
+        self.assertEqual(install_mod.PLUGIN_SOURCE, PLUGIN_ROOT)
         repo_mcp_before = json.loads(
             (PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8")
         )
@@ -45,6 +46,7 @@ class InstallTestCase(unittest.TestCase):
         rc = install_mod.main(["--target", str(self.target)])
         self.assertEqual(rc, 0)
         self.assertTrue((self.target / "plugin.json").is_file())
+        self.assertTrue((self.target / "config" / "module.json").is_file())
         self.assertTrue((self.target / "mcp" / "server.py").is_file())
         self.assertTrue((self.target / "scripts" / "sidecar_relay.py").is_file())
         self.assertFalse((self.target / "scripts" / "worker.py").exists())

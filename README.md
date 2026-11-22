@@ -4,7 +4,8 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro d�
 
 ## Architecture
 
-- **Boîte aux lettres centralisée SQLite WAL :** `~/.gemini/gravity-bridge/bridge.db` (configurable via `$GRAVITY_BRIDGE_HOME`). Stocke `workspaces` (avec heartbeat sidecar et `project_id`), `threads`, `messages` et `jobs` avec verrouillage atomique (`BEGIN IMMEDIATE`) et migration idempotente.
+- **Contrat module & manifeste (`plugin/`) :** `plugin/plugin.json` (9 champs officiels Antigravity) et `plugin/config/module.json` (`schema_version: 1`, `id: "bridge"`, `storage.subdir: "bridge"`).
+- **Boîte aux lettres centralisée SQLite WAL :** `~/.gemini/gravity/bridge/bridge.db` (résolution `home` > `$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge`). Stocke `workspaces` (avec heartbeat sidecar et `project_id`), `threads`, `messages` et `jobs` avec verrouillage atomique (`BEGIN IMMEDIATE`) et migration idempotente.
 - **Micro-sidecars natifs Antigravity App (`agentapi`) :** chaque projet cible lié dispose d'un micro-sidecar léger (`~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`) exécutant `scripts/sidecar_relay.py`. Après feu vert humain unique (`approved=True`), le relais crée une vraie conversation dans la barre latérale du projet cible via `agentapi new-conversation` (ou la poursuit via `agentapi send-message`), sans jamais lancer de CLI `agy` isolé ni toucher aux bases internes d'Antigravity.
 - **Isolation & sécurité :** zéro pollution des dépôts cibles, fail-fast si le sidecar cible est `unlinked`/`offline`, anti-boucle (`depth=1`, `caller_conversation_id`, `GRAVITY_BRIDGE_DEPTH`), plafond 32 Ko UTF-8 par message et filtrage heuristique des secrets (refus en entrée utilisateur, caviardage en sortie relais/log).
 
@@ -14,13 +15,13 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro d�
 ```powershell
 python install.py
 ```
-L'installeur copie `gravity-bridge-plugin/` vers `~/.gemini/config/plugins/gravity-bridge/`, adapte automatiquement `"python3"` sur la copie installée sous Windows si nécessaire et exécute `validate.py --strict`.
+L'installeur copie `plugin/` vers `~/.gemini/config/plugins/gravity-bridge/`, adapte automatiquement `"python3"` sur la copie installée sous Windows si nécessaire et exécute `validate.py --strict`.
 
 Options utiles :
 - `python install.py --dry-run` : simule l'installation sans écrire.
-- `python install.py --uninstall` : supprime le plugin installé (préserve `~/.gemini/gravity-bridge/bridge.db`).
+- `python install.py --uninstall` : supprime le plugin installé (préserve `~/.gemini/gravity/bridge/bridge.db`).
 
-*(Ou via CLI : `agy plugin validate ./gravity-bridge-plugin` puis `agy plugin install ./gravity-bridge-plugin`.)*
+*(Ou via CLI : `agy plugin validate ./plugin --strict` puis `agy plugin install ./plugin`.)*
 
 ### 2. Lier un projet cible (micro-sidecar)
 Depuis le chat (`/gravity-bridge link <slug> [chemin]`) ou en CLI :
@@ -48,7 +49,7 @@ python install.py --link /chemin/vers/mon-projet
 Tout développement s'effectue sur la branche `dev` (voir [AGENTS.md](AGENTS.md)). Suite obligatoire :
 
 ```powershell
-python gravity-bridge-plugin/scripts/validate.py --strict
-agy plugin validate ./gravity-bridge-plugin
+python plugin/scripts/validate.py --strict
+agy plugin validate ./plugin --strict
 python -m unittest discover -s tests -p "test_*.py" -v
 ```

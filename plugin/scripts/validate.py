@@ -31,6 +31,17 @@ OFFICIAL_PLUGIN_FIELDS = {
     "disabled",
 }
 REQUIRED_MANIFEST_FIELDS = OFFICIAL_PLUGIN_FIELDS - {"disabled"}
+MODULE_CONTRACT_FIELDS = {
+    "schema_version",
+    "id",
+    "plugin_name",
+    "role",
+    "storage",
+    "commands",
+    "capabilities",
+    "ui",
+    "signals",
+}
 ALLOWED_LOCAL_MODULES = {
     "core",
     "security",
@@ -53,6 +64,8 @@ EXPECTED_MCP_TOOLS = {
 }
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+MODULE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 PRIVATE_LEAK_RES: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     (
         "chemin personnel",
@@ -215,6 +228,19 @@ def _validate_manifest(root: Path, report: Report) -> None:
             f"plugin.json : 'name' doit être 'gravity-bridge', obtenu {manifest.get('name')!r}."
         )
 
+    for str_field in ("displayName", "homepage", "repository"):
+        val = manifest.get(str_field)
+        if not isinstance(val, str) or not val.strip():
+            report.error(f"plugin.json : '{str_field}' doit être une chaîne non vide.")
+
+    author = manifest.get("author")
+    if (
+        not isinstance(author, dict)
+        or not isinstance(author.get("name"), str)
+        or not author["name"].strip()
+    ):
+        report.error("plugin.json : 'author.name' doit être une chaîne non vide.")
+
     version = str(manifest.get("version") or "")
     if not SEMVER_RE.match(version):
         report.error(f"plugin.json : 'version' SemVer invalide ({version!r}).")
@@ -243,6 +269,125 @@ def _validate_manifest(root: Path, report: Report) -> None:
         )
         if not vb or float(vb.group(1)) <= 0 or float(vb.group(1)) != float(vb.group(2)):
             report.error(f"Logo {logo_rel} : viewBox carré 1:1 non détecté.")
+
+
+def _is_non_empty_str(val: object) -> bool:
+    return isinstance(val, str) and bool(val.strip())
+
+
+def _check_str_list(
+    val: object,
+    *,
+    field: str,
+    report: Report,
+    allow_empty: bool = False,
+    prefix: Optional[str] = None,
+) -> None:
+    if not isinstance(val, list):
+        report.error(f"config/module.json : '{field}' doit être une liste.")
+        return
+    if not allow_empty and not val:
+        report.error(f"config/module.json : '{field}' ne doit pas être vide.")
+        return
+    for item in val:
+        if not _is_non_empty_str(item):
+            report.error(f"config/module.json : '{field}' contient une entrée vide ou invalide.")
+            return
+        if prefix and not item.strip().startswith(prefix):
+            report.error(
+                f"config/module.json : chaque entrée de '{field}' doit commencer par {prefix!r}."
+            )
+            return
+
+
+def _validate_module_contract(root: Path, report: Report) -> None:
+    module_path = root / "config" / "module.json"
+    if not module_path.is_file():
+        report.error("config/module.json introuvable.")
+        return
+
+    raw_bytes = module_path.read_bytes()
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        report.error("config/module.json ne doit pas contenir de BOM UTF-8.")
+
+    try:
+        mod = json.loads(raw_bytes.decode("utf-8-sig"))
+    except Exception as exc:
+        report.error(f"config/module.json invalide : {exc}")
+        return
+
+    if not isinstance(mod, dict):
+        report.error("config/module.json doit contenir un objet JSON.")
+        return
+
+    missing = sorted(MODULE_CONTRACT_FIELDS - set(mod.keys()))
+    if missing:
+        report.error(f"config/module.json : champs requis manquants : {missing}")
+
+    sv = mod.get("schema_version")
+    if isinstance(sv, bool) or sv != 1:
+        report.error(f"config/module.json : 'schema_version' doit être 1, obtenu {sv!r}.")
+
+    mod_id = mod.get("id")
+    if not _is_non_empty_str(mod_id) or not MODULE_ID_RE.match(mod_id) or mod_id != "bridge":
+        report.error(f"config/module.json : 'id' doit être 'bridge', obtenu {mod_id!r}.")
+
+    pname = mod.get("plugin_name")
+    if pname != "gravity-bridge":
+        report.error(
+            f"config/module.json : 'plugin_name' doit être 'gravity-bridge', obtenu {pname!r}."
+        )
+
+    if not _is_non_empty_str(mod.get("role")):
+        report.error("config/module.json : 'role' doit être une chaîne non vide.")
+
+    storage = mod.get("storage")
+    if not isinstance(storage, dict):
+        report.error("config/module.json : 'storage' doit être un objet JSON.")
+    else:
+        subdir = storage.get("subdir")
+        if not _is_non_empty_str(subdir) or not MODULE_ID_RE.match(subdir) or subdir != "bridge":
+            report.error(
+                f"config/module.json : 'storage.subdir' doit être 'bridge', obtenu {subdir!r}."
+            )
+        env_ov = storage.get("env_override")
+        if (
+            not _is_non_empty_str(env_ov)
+            or not ENV_VAR_RE.match(env_ov)
+            or env_ov != "GRAVITY_BRIDGE_HOME"
+        ):
+            report.error(
+                f"config/module.json : 'storage.env_override' doit être 'GRAVITY_BRIDGE_HOME', obtenu {env_ov!r}."
+            )
+
+    _check_str_list(mod.get("commands"), field="commands", report=report, prefix="/")
+    _check_str_list(mod.get("capabilities"), field="capabilities", report=report)
+
+    ui = mod.get("ui")
+    if not isinstance(ui, dict):
+        report.error("config/module.json : 'ui' doit être un objet JSON.")
+    else:
+        if not _is_non_empty_str(ui.get("mode")):
+            report.error("config/module.json : 'ui.mode' doit être une chaîne non vide.")
+        if not _is_non_empty_str(ui.get("target")):
+            report.error("config/module.json : 'ui.target' doit être une chaîne non vide.")
+
+    signals = mod.get("signals")
+    if not isinstance(signals, dict):
+        report.error("config/module.json : 'signals' doit être un objet JSON.")
+    else:
+        _check_str_list(
+            signals.get("produces"),
+            field="signals.produces",
+            report=report,
+            allow_empty=True,
+        )
+        _check_str_list(
+            signals.get("consumes"),
+            field="signals.consumes",
+            report=report,
+            allow_empty=True,
+        )
 
 
 def _validate_skills(root: Path, report: Report) -> None:
@@ -360,6 +505,7 @@ def _run_mcp_dry_run(root: Path, report: Report) -> None:
         env["GRAVITY_BRIDGE_HOME"] = str(Path(tmp) / "bridge-home")
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUTF8"] = "1"
+        env.pop("GRAVITY_HOME", None)
         env.pop("GRAVITY_BRIDGE_DEPTH", None)
 
         requests = [
@@ -433,13 +579,14 @@ def _run_mcp_dry_run(root: Path, report: Report) -> None:
 
 
 def validate_plugin(root: Path, report: Report) -> None:
-    """Audite le manifeste, les skills/règles, la config MCP, la stdlib et le dry-run MCP."""
+    """Audite le manifeste, module.json, les skills/règles, la config MCP, la stdlib et le dry-run MCP."""
     _validate_manifest(root, report)
+    _validate_module_contract(root, report)
     _validate_skills(root, report)
     _validate_rules_and_no_hooks(root, report)
     _validate_mcp_config(root, report)
 
-    for sub in ("assets", "core", "mcp", "rules", "scripts", "skills"):
+    for sub in ("assets", "config", "core", "mcp", "rules", "scripts", "skills"):
         if not (root / sub).is_dir():
             report.error(f"Dossier requis manquant : {sub}/")
 

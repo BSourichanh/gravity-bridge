@@ -642,7 +642,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--home",
         type=Path,
         default=None,
-        help="Répertoire GRAVITY_BRIDGE_HOME optionnel.",
+        help="Répertoire de stockage personnalisé (défaut $GRAVITY_BRIDGE_HOME > $GRAVITY_HOME/bridge > ~/.gemini/gravity/bridge).",
     )
     parser.add_argument(
         "--poll-interval",

@@ -10,8 +10,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "gravity-bridge-plugin"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
@@ -24,6 +25,7 @@ from core.security import (  # noqa: E402
 from core.store import (  # noqa: E402
     ORPHAN_ERROR_SUMMARY,
     BridgeStore,
+    default_bridge_home,
     is_pid_alive,
     resolve_bridge_home,
     utc_now_iso,
@@ -166,17 +168,46 @@ class TestSchemaMigrationAndWorkspaces(StoreTestCase):
         self.assertEqual(ws_b["sidecar_status"], "unlinked")
         self.assertIsNone(ws_b["project_id"])
 
-    def test_resolve_bridge_home_uses_env_variable(self) -> None:
-        prev = os.environ.get("GRAVITY_BRIDGE_HOME")
-        try:
-            custom = self.root / "env-bridge"
-            os.environ["GRAVITY_BRIDGE_HOME"] = str(custom)
-            self.assertEqual(resolve_bridge_home(), custom.resolve())
-        finally:
-            if prev is None:
-                os.environ.pop("GRAVITY_BRIDGE_HOME", None)
-            else:
-                os.environ["GRAVITY_BRIDGE_HOME"] = prev
+    def test_resolve_bridge_home_precedence_chain(self) -> None:
+        explicit = self.root / "explicit-bridge"
+        custom_bridge = self.root / "env-bridge"
+        custom_gravity = self.root / "env-gravity"
+        fake_home = self.root / "fake-home"
+
+        with mock.patch.object(Path, "home", return_value=fake_home), mock.patch.dict(
+            os.environ,
+            {
+                "GRAVITY_BRIDGE_HOME": str(custom_bridge),
+                "GRAVITY_HOME": str(custom_gravity),
+            },
+            clear=False,
+        ):
+            # 1. Argument home prioritaire sur tout.
+            self.assertEqual(resolve_bridge_home(explicit), explicit.resolve())
+            # 2. $GRAVITY_BRIDGE_HOME prioritaire sur $GRAVITY_HOME/bridge.
+            self.assertEqual(resolve_bridge_home(), custom_bridge.resolve())
+
+        with mock.patch.object(Path, "home", return_value=fake_home), mock.patch.dict(
+            os.environ,
+            {
+                "GRAVITY_BRIDGE_HOME": "   ",
+                "GRAVITY_HOME": str(custom_gravity),
+            },
+            clear=False,
+        ):
+            # 3. $GRAVITY_HOME/bridge lorsque $GRAVITY_BRIDGE_HOME est absent/vide.
+            self.assertEqual(resolve_bridge_home(), (custom_gravity / "bridge").resolve())
+
+        clean_env = dict(os.environ)
+        clean_env.pop("GRAVITY_BRIDGE_HOME", None)
+        clean_env.pop("GRAVITY_HOME", None)
+        with mock.patch.object(Path, "home", return_value=fake_home), mock.patch.dict(
+            os.environ, clean_env, clear=True
+        ):
+            # 4. Repli final ~/.gemini/gravity/bridge sans toucher au vrai HOME.
+            expected_default = (fake_home / ".gemini" / "gravity" / "bridge").resolve()
+            self.assertEqual(default_bridge_home(), expected_default)
+            self.assertEqual(resolve_bridge_home(), expected_default)
 
     def test_register_workspace_idempotence_and_windows_case_dedup(self) -> None:
         first = self.store.register_workspace(str(self.ws_arch), project_id="proj-arch-1")
