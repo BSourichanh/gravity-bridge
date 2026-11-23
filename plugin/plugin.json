@@ -7,9 +7,9 @@
   "homepage": "https://github.com/BSourichanh/gravity-bridge",
   "repository": "https://github.com/BSourichanh/gravity-bridge.git",
   "suggestedPrompts": [
-    "/gravity-bridge",
-    "/gravity-bridge workspaces",
-    "/gravity-bridge status"
+    "/gravity-bridge workspaces — Lister les dépôts liés à la boîte inter-projets",
+    "/gravity-bridge read — Consulter les fils et messages en attente",
+    "/gravity-bridge status — Inspecter l'état des relais et sidecars actifs"
   ],
   "author": {
     "name": "Gravity Contributors"

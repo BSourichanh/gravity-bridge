@@ -2,6 +2,13 @@
 
 Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro dépendance tierce, zéro CLI `agy`, zéro hook permanent) permettant la communication structurée et l'ouverture directe de conversations natives entre projets dans **Antigravity App**, sans jamais déposer de fichiers dans les dépôts suivis.
 
+> **Démarrage 2 min & Place dans l'écosystème**
+> - **Positionnement :** **Palier 3 — Multi-projets** *(prérequis : `gravity` Core)* — boîte aux lettres SQLite et micro-sidecars `agentapi` pour échanger des fils structurés et ouvrir des conversations natives entre dépôts.
+> - **Première commande :** `python install.py --link <chemin>` puis `/gravity-bridge workspaces`
+> - **Guides `gravity/docs/` :**
+>   - [Démarrage rapide](https://github.com/BSourichanh/gravity/blob/main/docs/getting-started.md) · [Parcours utilisateur](https://github.com/BSourichanh/gravity/blob/main/docs/user-journey.md)
+>   - [Aide-mémoire des commandes](https://github.com/BSourichanh/gravity/blob/main/docs/command-cheatsheet.md) · [Dépannage & cycle de vie](https://github.com/BSourichanh/gravity/blob/main/docs/troubleshooting-and-lifecycle.md)
+
 ## Architecture
 
 - **Contrat module & manifeste (`plugin/`) :** `plugin/plugin.json` (9 champs officiels Antigravity) et `plugin/config/module.json` (`schema_version: 1`, `id: "bridge"`, `storage.subdir: "bridge"`).

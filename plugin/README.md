@@ -2,6 +2,13 @@
 
 Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CLI `agy`, zéro hook permanent, contrat `config/module.json` `id: "bridge"`) assurant la communication inter-projets via une boîte aux lettres SQLite centralisée (`$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db`) et des micro-sidecars `agentapi` ouvrant de vraies conversations natives dans **Antigravity App**.
 
+> **Démarrage 2 min & Place dans l'écosystème**
+> - **Positionnement :** **Palier 3 — Multi-projets** *(prérequis : `gravity` Core)* — boîte aux lettres SQLite et micro-sidecars `agentapi` pour échanger des fils structurés et ouvrir des conversations natives entre dépôts.
+> - **Première commande :** `python install.py --link <chemin>` puis `/gravity-bridge workspaces`
+> - **Guides `gravity/docs/` :**
+>   - [Démarrage rapide](https://github.com/BSourichanh/gravity/blob/main/docs/getting-started.md) · [Parcours utilisateur](https://github.com/BSourichanh/gravity/blob/main/docs/user-journey.md)
+>   - [Aide-mémoire des commandes](https://github.com/BSourichanh/gravity/blob/main/docs/command-cheatsheet.md) · [Dépannage & cycle de vie](https://github.com/BSourichanh/gravity/blob/main/docs/troubleshooting-and-lifecycle.md)
+
 ## Commandes `/gravity-bridge`
 
 - `/gravity-bridge` *(défaut)* : enregistre le workspace actif si absent et affiche les sidecars (`online`/`offline`/`unlinked`), messages ouverts/non lus et jobs actifs ou récents.

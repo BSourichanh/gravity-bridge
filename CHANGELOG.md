@@ -5,6 +5,11 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 
 ## [Unreleased]
 
+### Changed
+- **Alignement UX & documentation (`plugin/plugin.json`, `README.md`, `plugin/README.md`) :**
+  - Harmonisation des `suggestedPrompts` de `plugin/plugin.json` sur la convention `/cmd — résumé` (`<= 100` caractères).
+  - Ajout en tête de `README.md` et `plugin/README.md` de l'encart « Démarrage 2 min & Place dans l'écosystème » (**Palier 3 — Multi-projets**, première commande et liens directs vers `gravity/docs/`).
+
 ## [0.3.0] - 2026-11-23
 
 ### Added
