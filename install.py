@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent
 PLUGIN_SOURCE = REPO_ROOT / "plugin"
@@ -20,6 +21,22 @@ PLUGIN_SOURCE = REPO_ROOT / "plugin"
 def default_target_dir() -> Path:
     """Retourne le dossier utilisateur standard d'installation des plugins Antigravity."""
     return Path.home() / ".gemini" / "config" / "plugins" / "gravity-bridge"
+
+
+def resolve_target_dir(
+    *,
+    scope: str = "global",
+    workspace: Optional[Path] = None,
+    target: Optional[Path] = None,
+) -> Path:
+    """Résout le dossier cible selon --target, --scope et --workspace."""
+    if target is not None:
+        return target
+    if scope == "workspace":
+        if workspace is None:
+            raise ValueError("--scope workspace exige --workspace PATH.")
+        return workspace.expanduser() / ".agents" / "plugins" / "gravity-bridge"
+    return default_target_dir()
 
 
 def _configure_stdio() -> None:
@@ -36,12 +53,17 @@ def _load_validate_module(plugin_dir: Path):
     validate_path = plugin_dir / "scripts" / "validate.py"
     if not validate_path.is_file():
         raise FileNotFoundError(f"Script validate.py introuvable : {validate_path}")
-    spec = importlib.util.spec_from_file_location("gravity_bridge_validate", validate_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Impossible de charger {validate_path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    prev_dwb = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec = importlib.util.spec_from_file_location("gravity_bridge_validate", validate_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Impossible de charger {validate_path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        sys.dont_write_bytecode = prev_dwb
 
 
 def _ignore_copy(_dir: str, names: List[str]) -> List[str]:
@@ -75,9 +97,107 @@ def _import_core(plugin_root: Path):
     )
 
 
+def _read_plugin_manifest(root: Path) -> Optional[Dict[str, object]]:
+    manifest = root / "plugin.json"
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _is_existing_bridge_install(dst: Path) -> bool:
+    data = _read_plugin_manifest(dst)
+    return isinstance(data, dict) and data.get("name") == "gravity-bridge"
+
+
+def _is_target_occupied(dst: Path) -> bool:
+    """Retourne True si dst existe avec du contenu étranger (ni absent, ni install Bridge, ni dossier vide)."""
+    if dst.is_symlink() or dst.is_file():
+        return True
+    if not dst.exists():
+        return False
+    if _is_existing_bridge_install(dst):
+        return False
+    try:
+        return any(dst.iterdir())
+    except OSError:
+        return True
+
+
+def _iter_plugin_files(root: Path) -> Dict[str, Path]:
+    files: Dict[str, Path] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if "__pycache__" in path.parts or path.suffix.lower() in (".pyc", ".pyo"):
+            continue
+        files[path.relative_to(root).as_posix()] = path
+    return files
+
+
+def _normalized_mcp_config(raw_text: str) -> object:
+    """Normalise mcp_config.json pour ignorer l'adaptation portable python3 -> python / py -3."""
+    data = json.loads(raw_text)
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if isinstance(servers, dict):
+        for scfg in servers.values():
+            if not isinstance(scfg, dict):
+                continue
+            cmd = scfg.get("command")
+            args = list(scfg.get("args") or [])
+            if cmd == "py" and args[:1] == ["-3"]:
+                scfg["command"] = "python3"
+                scfg["args"] = args[1:]
+            elif cmd in ("python", "python3"):
+                scfg["command"] = "python3"
+    return data
+
+
+def _detect_install_drift(src: Path, dst: Path) -> List[str]:
+    """Compare la source et la copie installée en lecture seule et retourne les écarts éventuels."""
+    drifts: List[str] = []
+    src_manifest = _read_plugin_manifest(src) or {}
+    dst_manifest = _read_plugin_manifest(dst) or {}
+    src_ver = str(src_manifest.get("version") or "?")
+    dst_ver = str(dst_manifest.get("version") or "?")
+    if src_ver != dst_ver:
+        drifts.append(f"version installée {dst_ver} != source {src_ver}")
+
+    src_files = _iter_plugin_files(src)
+    dst_files = _iter_plugin_files(dst)
+    missing = sorted(set(src_files) - set(dst_files))
+    extra = sorted(set(dst_files) - set(src_files))
+    if missing:
+        drifts.append(f"{len(missing)} fichier(s) manquant(s)")
+    if extra:
+        drifts.append(f"{len(extra)} fichier(s) supplémentaire(s)")
+
+    modified: List[str] = []
+    for rel in sorted(set(src_files) & set(dst_files)):
+        if rel == "mcp_config.json":
+            try:
+                if _normalized_mcp_config(src_files[rel].read_text(encoding="utf-8")) != _normalized_mcp_config(
+                    dst_files[rel].read_text(encoding="utf-8")
+                ):
+                    modified.append(rel)
+            except Exception:
+                modified.append(rel)
+        else:
+            if src_files[rel].read_bytes() != dst_files[rel].read_bytes():
+                modified.append(rel)
+    if modified:
+        drifts.append(f"{len(modified)} fichier(s) modifié(s)")
+    return drifts
+
+
 def _sync_staged_into_target(staged: Path, dst: Path) -> None:
     """Remplace dst par staged en gérant le verrouillage Windows sur le dossier racine."""
-    if dst.exists():
+    if dst.is_symlink() or dst.is_file():
+        dst.unlink()
+    elif dst.exists():
         try:
             shutil.rmtree(dst)
         except PermissionError:
@@ -89,14 +209,127 @@ def _sync_staged_into_target(staged: Path, dst: Path) -> None:
     shutil.copytree(staged, dst, ignore=_ignore_copy, dirs_exist_ok=True)
 
 
+def _run_validate_subprocess(plugin_root: Path) -> int:
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            str(plugin_root / "scripts" / "validate.py"),
+            "--strict",
+            "--plugin-root",
+            str(plugin_root),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    if proc.stdout.strip():
+        print(proc.stdout.rstrip())
+    if proc.returncode != 0 and proc.stderr.strip():
+        print(proc.stderr.rstrip(), file=sys.stderr)
+    return proc.returncode
+
+
+def check_plugin(
+    source: Path,
+    target: Path,
+    *,
+    scope: str = "global",
+    method: str = "copy",
+    strict: bool = False,
+) -> int:
+    """Inspecte l'environnement, la source et la cible en 100 % lecture seule (zéro écriture disque)."""
+    src = source.expanduser().resolve()
+    dst = target.expanduser().resolve()
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    py_ok = sys.version_info >= (3, 10)
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    print(f"[CHECK] Python : {py_ver} ({sys.executable})")
+    if not py_ok:
+        errors.append(f"Python 3.10+ requis (détecté : {py_ver}).")
+
+    agy_bin = shutil.which("agy")
+    print(f"[CHECK] agy CLI : {agy_bin or 'absent'}")
+    if method == "agy" and not agy_bin:
+        errors.append("CLI 'agy' introuvable dans le PATH pour --method agy.")
+
+    print(f"[CHECK] Scope : {scope}")
+    print(f"[CHECK] Méthode : {method}")
+    print(f"[CHECK] Source : {src}")
+    print(f"[CHECK] Cible : {dst}")
+
+    src_manifest = _read_plugin_manifest(src)
+    if not src.is_dir() or src_manifest is None:
+        errors.append(f"Source plugin invalide ou plugin.json illisible : {src}")
+    else:
+        src_ver = src_manifest.get("version", "?")
+        print(f"[CHECK] Manifeste source : {src_manifest.get('name')} v{src_ver}")
+        try:
+            validate_mod = _load_validate_module(src)
+            report = validate_mod.Report()
+            validate_mod._validate_manifest(src, report)
+            validate_mod._validate_module_contract(src, report)
+            validate_mod._validate_skills(src, report)
+            validate_mod._validate_rules_and_no_hooks(src, report)
+            validate_mod._validate_mcp_config(src, report)
+            for py_file in sorted(src.rglob("*.py")):
+                if "__pycache__" in py_file.parts:
+                    continue
+                validate_mod._check_stdlib_only(py_file, report)
+            errors.extend(report.errors)
+            warnings.extend(report.warnings)
+            for info in report.infos:
+                print(f"[CHECK] {info}")
+        except Exception as exc:
+            errors.append(f"Impossible d'auditer la source en lecture seule : {exc}")
+
+    if not dst.exists() and not dst.is_symlink():
+        print("[CHECK] État cible : non installé")
+    elif _is_target_occupied(dst):
+        msg = f"Cible occupée par un contenu étranger : {dst}"
+        print(f"[CHECK] État cible : occupée ({dst})")
+        warnings.append(msg)
+    elif _is_existing_bridge_install(dst):
+        dst_manifest = _read_plugin_manifest(dst) or {}
+        dst_ver = dst_manifest.get("version", "?")
+        drifts = _detect_install_drift(src, dst) if src.is_dir() else []
+        if drifts:
+            drift_txt = ", ".join(drifts)
+            print(f"[CHECK] État cible : installé v{dst_ver} (dérive détectée : {drift_txt})")
+            warnings.append(f"Dérive détectée sur la cible : {drift_txt}")
+        else:
+            print(f"[CHECK] État cible : installé et à jour (v{dst_ver})")
+    else:
+        print("[CHECK] État cible : dossier vide")
+
+    for err in errors:
+        print(f"[ERROR] {err}", file=sys.stderr)
+    for warn in warnings:
+        print(f"[WARN]  {warn}")
+
+    if errors or (strict and warnings):
+        return 1
+    return 0
+
+
 def install_plugin(
     source: Path,
     target: Path,
     *,
     dry_run: bool = False,
     run_validate: bool = True,
+    force: bool = False,
+    method: str = "copy",
 ) -> int:
-    """Installe plugin/ vers target, adapte python3 sur la copie et valide."""
+    """Installe plugin/ vers target (copy ou agy), adapte python3 sur la copie et valide."""
     src = source.expanduser().resolve()
     dst = target.expanduser().resolve()
 
@@ -104,8 +337,53 @@ def install_plugin(
         print(f"[ERROR] Source plugin invalide : {src}", file=sys.stderr)
         return 1
 
+    if method == "agy":
+        if _is_target_occupied(dst) and not force:
+            print(
+                f"[ERROR] Cible occupée : {dst} (utilisez --force pour écraser).",
+                file=sys.stderr,
+            )
+            return 1
+        if dry_run:
+            if run_validate:
+                print(f"[DRY-RUN] Validation : validate.py --strict --plugin-root {src}")
+            print(f"[DRY-RUN] Délégation : agy plugin install {src}")
+            return 0
+        if run_validate:
+            rc_val = _run_validate_subprocess(src)
+            if rc_val != 0:
+                return rc_val
+        agy_bin = shutil.which("agy")
+        if not agy_bin:
+            print("[ERROR] CLI 'agy' introuvable dans le PATH.", file=sys.stderr)
+            return 1
+        proc = subprocess.run(
+            [agy_bin, "plugin", "install", str(src)],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.stdout.strip():
+            print(proc.stdout.rstrip())
+        if proc.returncode != 0:
+            if proc.stderr.strip():
+                print(proc.stderr.rstrip(), file=sys.stderr)
+            return proc.returncode
+        print(f"[OK] Plugin Gravity Bridge installé via agy depuis {src}")
+        return 0
+
     if src == dst:
         print("[ERROR] La source et la cible d'installation sont identiques.", file=sys.stderr)
+        return 1
+
+    if _is_target_occupied(dst) and not force:
+        print(
+            f"[ERROR] Cible occupée : {dst} (utilisez --force pour écraser).",
+            file=sys.stderr,
+        )
         return 1
 
     if dry_run:
@@ -124,31 +402,9 @@ def install_plugin(
         validate_mod.fix_python_cmd(staged)
 
         if run_validate:
-            env = dict(os.environ)
-            env["PYTHONDONTWRITEBYTECODE"] = "1"
-            proc = subprocess.run(
-                [
-                    sys.executable,
-                    "-B",
-                    str(staged / "scripts" / "validate.py"),
-                    "--strict",
-                    "--plugin-root",
-                    str(staged),
-                ],
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                env=env,
-                timeout=30,
-                check=False,
-            )
-            if proc.stdout.strip():
-                print(proc.stdout.rstrip())
-            if proc.returncode != 0:
-                if proc.stderr.strip():
-                    print(proc.stderr.rstrip(), file=sys.stderr)
-                return proc.returncode
+            rc_val = _run_validate_subprocess(staged)
+            if rc_val != 0:
+                return rc_val
 
         _sync_staged_into_target(staged, dst)
 
@@ -157,10 +413,41 @@ def install_plugin(
     return 0
 
 
-def uninstall_plugin(target: Path, *, dry_run: bool = False) -> int:
+def uninstall_plugin(
+    target: Path,
+    *,
+    dry_run: bool = False,
+    method: str = "copy",
+) -> int:
     """Supprime uniquement le dossier du plugin installé (sans toucher à bridge.db)."""
+    if method == "agy":
+        if dry_run:
+            print("[DRY-RUN] Délégation : agy plugin uninstall gravity-bridge")
+            return 0
+        agy_bin = shutil.which("agy")
+        if not agy_bin:
+            print("[ERROR] CLI 'agy' introuvable dans le PATH.", file=sys.stderr)
+            return 1
+        proc = subprocess.run(
+            [agy_bin, "plugin", "uninstall", "gravity-bridge"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.stdout.strip():
+            print(proc.stdout.rstrip())
+        if proc.returncode != 0:
+            if proc.stderr.strip():
+                print(proc.stderr.rstrip(), file=sys.stderr)
+            return proc.returncode
+        print("[OK] Plugin désinstallé via agy (données ~/.gemini/gravity/bridge/ préservées).")
+        return 0
+
     dst = target.expanduser().resolve()
-    if not dst.exists():
+    if not dst.exists() and not dst.is_symlink():
         print(f"[INFO] Plugin absent de {dst} : rien à désinstaller.")
         return 0
 
@@ -168,7 +455,10 @@ def uninstall_plugin(target: Path, *, dry_run: bool = False) -> int:
         print(f"[DRY-RUN] Suppression du dossier plugin : {dst}")
         return 0
 
-    shutil.rmtree(dst)
+    if dst.is_symlink() or dst.is_file():
+        dst.unlink()
+    else:
+        shutil.rmtree(dst)
     print(f"[OK] Plugin désinstallé de {dst} (données ~/.gemini/gravity/bridge/ préservées).")
     return 0
 
@@ -332,18 +622,43 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Installeur / désinstalleur et gestionnaire de liaison sidecar Gravity Bridge"
     )
     parser.add_argument(
+        "--plugin-root",
         "--source",
+        dest="plugin_root",
         type=Path,
         default=PLUGIN_SOURCE,
-        help="Dossier source du plugin (défaut : ./plugin).",
+        help="Dossier source du plugin (défaut : ./plugin ; alias --source).",
+    )
+    parser.add_argument(
+        "--scope",
+        choices=("global", "workspace"),
+        default="global",
+        help="Portée d'installation : global (~/.gemini/config/plugins) ou workspace (<workspace>/.agents/plugins).",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Dossier du workspace cible requis avec --scope workspace.",
     )
     parser.add_argument(
         "--target",
         type=Path,
-        default=default_target_dir(),
-        help="Dossier cible d'installation Antigravity.",
+        default=None,
+        help="Dossier cible explicite d'installation (prioritaire sur --scope).",
+    )
+    parser.add_argument(
+        "--method",
+        choices=("copy", "agy"),
+        default="copy",
+        help="Méthode d'installation : copy (défaut stdlib) ou agy (délégation à 'agy plugin install', --scope global uniquement).",
     )
     mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--check",
+        action="store_true",
+        help="Inspection 100 %% lecture seule (Python, agy, source, cible et dérive éventuelle).",
+    )
     mode_group.add_argument(
         "--uninstall",
         action="store_true",
@@ -418,20 +733,62 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Affiche les actions sans modifier le disque.",
     )
     parser.add_argument(
-        "--no-validate",
+        "--force",
         action="store_true",
-        help="Ignore la validation stricte post-installation.",
+        help="Autorise l'écrasement d'une cible occupée ou installation existante.",
+    )
+    parser.add_argument(
+        "--skip-validate",
+        "--no-validate",
+        dest="skip_validate",
+        action="store_true",
+        help="Ignore la validation pré-installation (hors --strict ; alias --no-validate).",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exige une validation stricte (force la validation et échoue sur avertissement en --check).",
     )
     args = parser.parse_args(argv)
 
+    if args.scope == "workspace" and args.workspace is None:
+        parser.error("--scope workspace exige --workspace PATH.")
+    if args.workspace is not None:
+        ws_expanded = args.workspace.expanduser()
+        if ws_expanded.exists() and not ws_expanded.is_dir():
+            parser.error(f"--workspace doit désigner un dossier : {args.workspace}")
+    if args.method == "agy":
+        if args.scope != "global":
+            parser.error("--method agy est limité à --scope global (incompatible avec --scope workspace).")
+        if args.target is not None:
+            parser.error("--method agy est incompatible avec --target.")
+
+    resolved_target = resolve_target_dir(
+        scope=args.scope,
+        workspace=args.workspace,
+        target=args.target,
+    )
+
+    if args.check:
+        return check_plugin(
+            args.plugin_root,
+            resolved_target,
+            scope=args.scope,
+            method=args.method,
+            strict=args.strict,
+        )
     if args.uninstall:
-        return uninstall_plugin(args.target, dry_run=args.dry_run)
+        return uninstall_plugin(
+            resolved_target,
+            dry_run=args.dry_run,
+            method=args.method,
+        )
     if args.link is not None:
         try:
             return link_workspace_cli(
                 args.link,
-                target=args.target,
-                source=args.source,
+                target=resolved_target,
+                source=args.plugin_root,
                 slug=args.slug,
                 project_id=args.project_id,
                 source_project_id=args.source_project_id,
@@ -449,8 +806,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             return unlink_workspace_cli(
                 args.unlink,
-                target=args.target,
-                source=args.source,
+                target=resolved_target,
+                source=args.plugin_root,
                 configure_config=args.configure_config,
                 sidecars_dir=args.sidecars_dir,
                 config_path=args.config_path,
@@ -463,10 +820,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
 
     return install_plugin(
-        args.source,
-        args.target,
+        args.plugin_root,
+        resolved_target,
         dry_run=args.dry_run,
-        run_validate=not args.no_validate,
+        run_validate=bool(args.strict or not args.skip_validate),
+        force=args.force,
+        method=args.method,
     )
 
 

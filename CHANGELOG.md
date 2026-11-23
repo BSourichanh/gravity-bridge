@@ -5,6 +5,11 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 
 ## [Unreleased]
 
+### Added
+- **Contrat CLI commun `install.py` (11 drapeaux) :**
+  - Ajout de `--check` (inspection 100 % lecture seule : Python, `agy`, source, cible résolue, état et détection de dérive, zéro écriture disque), `--force` (écrasement cible occupée), `--scope {global,workspace}`, `--workspace PATH`, `--method {copy,agy}` (avec rejet CLI code `2` pour `--method agy` hors `--scope global` ou avec `--target`, et pour `--scope workspace` sans `--workspace`), `--plugin-root` (alias de `--source`), `--skip-validate` (avec conservation de `--no-validate` en alias rétrocompatible) et `--strict`.
+  - Extension de `tests/test_install.py` dans `TemporaryDirectory` couvrant tous les nouveaux drapeaux sans toucher `~/.gemini/`, et mise à jour de `README.md` et `plugin/README.md`.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

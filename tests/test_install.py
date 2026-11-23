@@ -344,6 +344,170 @@ class InstallTestCase(unittest.TestCase):
         self.assertEqual(proc_out.returncode, 0, proc_out.stdout + proc_out.stderr)
         self.assertFalse(self.target.exists())
 
+    def test_check_is_read_only_and_detects_state_and_drift(self) -> None:
+        # 1. Cible absente : code 0 et zéro écriture disque (aucun __pycache__ généré).
+        pycache_dir = PLUGIN_ROOT / "scripts" / "__pycache__"
+        had_pycache = pycache_dir.exists()
+        rc_absent = install_mod.main(["--check", "--target", str(self.target)])
+        self.assertEqual(rc_absent, 0)
+        self.assertFalse(self.target.exists())
+        if not had_pycache:
+            self.assertFalse(pycache_dir.exists())
+
+        # 2. Après installation : à jour, code 0 même avec --strict.
+        self.assertEqual(install_mod.main(["--target", str(self.target)]), 0)
+        rc_ok = install_mod.main(["--check", "--strict", "--target", str(self.target)])
+        self.assertEqual(rc_ok, 0)
+
+        # 3. Dérive simulée : --check avertit (0), --check --strict échoue (1).
+        (self.target / "drift.txt").write_text("extra", encoding="utf-8")
+        self.assertEqual(install_mod.main(["--check", "--target", str(self.target)]), 0)
+        self.assertEqual(
+            install_mod.main(["--check", "--strict", "--target", str(self.target)]),
+            1,
+        )
+
+        # 4. Source invalide : code 1.
+        bad_src = self.root / "bad-plugin"
+        bad_src.mkdir()
+        self.assertEqual(
+            install_mod.main(
+                ["--check", "--plugin-root", str(bad_src), "--target", str(self.target)]
+            ),
+            1,
+        )
+
+    def test_scope_workspace_install_uninstall_and_missing_workspace_error(self) -> None:
+        # --scope workspace sans --workspace -> code CLI 2.
+        with self.assertRaises(SystemExit) as ctx:
+            install_mod.main(["--scope", "workspace"])
+        self.assertEqual(ctx.exception.code, 2)
+
+        ws_target = self.ws_repo / ".agents" / "plugins" / "gravity-bridge"
+        rc_check = install_mod.main(
+            ["--check", "--scope", "workspace", "--workspace", str(self.ws_repo)]
+        )
+        self.assertEqual(rc_check, 0)
+        self.assertFalse(ws_target.exists())
+
+        rc_in = install_mod.main(
+            ["--scope", "workspace", "--workspace", str(self.ws_repo)]
+        )
+        self.assertEqual(rc_in, 0)
+        self.assertTrue((ws_target / "plugin.json").is_file())
+        self.assertTrue((ws_target / "config" / "module.json").is_file())
+
+        rc_un = install_mod.main(
+            ["--uninstall", "--scope", "workspace", "--workspace", str(self.ws_repo)]
+        )
+        self.assertEqual(rc_un, 0)
+        self.assertFalse(ws_target.exists())
+
+    def test_force_required_for_occupied_target_dir_and_file(self) -> None:
+        # Cible occupée par un dossier non-plugin.
+        self.target.mkdir(parents=True)
+        foreign_file = self.target / "foreign.txt"
+        foreign_file.write_text("keep", encoding="utf-8")
+
+        rc_refused = install_mod.main(["--target", str(self.target)])
+        self.assertEqual(rc_refused, 1)
+        self.assertTrue(foreign_file.is_file())
+
+        rc_forced = install_mod.main(["--target", str(self.target), "--force"])
+        self.assertEqual(rc_forced, 0)
+        self.assertFalse(foreign_file.exists())
+        self.assertTrue((self.target / "plugin.json").is_file())
+
+        # Cible occupée par un fichier régulier.
+        file_target = self.root / "occupied-file"
+        file_target.write_text("not-a-dir", encoding="utf-8")
+        self.assertEqual(install_mod.main(["--target", str(file_target)]), 1)
+        self.assertEqual(
+            install_mod.main(["--target", str(file_target), "--force"]),
+            0,
+        )
+        self.assertTrue((file_target / "plugin.json").is_file())
+
+    def test_skip_validate_no_validate_alias_and_strict_override(self) -> None:
+        with mock.patch.object(
+            install_mod, "_run_validate_subprocess", return_value=0
+        ) as mock_val:
+            self.assertEqual(
+                install_mod.main(["--target", str(self.target), "--skip-validate"]),
+                0,
+            )
+            mock_val.assert_not_called()
+
+            self.assertEqual(
+                install_mod.main(["--target", str(self.target), "--no-validate"]),
+                0,
+            )
+            mock_val.assert_not_called()
+
+            # --strict force la validation même si --skip-validate est présent.
+            self.assertEqual(
+                install_mod.main(
+                    ["--target", str(self.target), "--skip-validate", "--strict"]
+                ),
+                0,
+            )
+            mock_val.assert_called_once()
+
+    def test_method_agy_constraints_and_delegation(self) -> None:
+        # --method agy rejeté avec --scope workspace (code 2).
+        with self.assertRaises(SystemExit) as ctx_ws:
+            install_mod.main(
+                [
+                    "--method",
+                    "agy",
+                    "--scope",
+                    "workspace",
+                    "--workspace",
+                    str(self.ws_repo),
+                ]
+            )
+        self.assertEqual(ctx_ws.exception.code, 2)
+
+        # --method agy rejeté avec --target (code 2).
+        with self.assertRaises(SystemExit) as ctx_tgt:
+            install_mod.main(["--method", "agy", "--target", str(self.target)])
+        self.assertEqual(ctx_tgt.exception.code, 2)
+
+        # Délégation mockée vers agy (zéro écriture dans ~/.gemini/).
+        fake_global = self.root / "global-plugins" / "gravity-bridge"
+        completed = subprocess.CompletedProcess(
+            args=["agy", "plugin", "install", str(PLUGIN_ROOT)],
+            returncode=0,
+            stdout="Installed\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            install_mod, "default_target_dir", return_value=fake_global
+        ), mock.patch.object(
+            install_mod.shutil, "which", return_value="agy"
+        ), mock.patch.object(
+            install_mod, "_run_validate_subprocess", return_value=0
+        ) as mock_val, mock.patch.object(
+            install_mod.subprocess, "run", return_value=completed
+        ) as mock_run:
+            rc = install_mod.main(
+                ["--method", "agy", "--plugin-root", str(PLUGIN_ROOT)]
+            )
+            self.assertEqual(rc, 0)
+            mock_val.assert_called_once()
+            mock_run.assert_called_once()
+            self.assertEqual(
+                mock_run.call_args[0][0],
+                ["agy", "plugin", "install", str(PLUGIN_ROOT.resolve())],
+            )
+
+            rc_un = install_mod.main(["--uninstall", "--method", "agy"])
+            self.assertEqual(rc_un, 0)
+            self.assertEqual(
+                mock_run.call_args[0][0],
+                ["agy", "plugin", "uninstall", "gravity-bridge"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

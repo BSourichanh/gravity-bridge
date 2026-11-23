@@ -18,6 +18,10 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CL
 
 `register_workspace`, `link_workspace`, `list_workspaces`, `send_message`, `list_inbox`, `read_thread`, `reply_thread`, `dispatch_thread`, `manage_thread`.
 
+## Installation (`install.py`)
+
+`install.py` suit le contrat CLI commun à 11 drapeaux (`--check` en lecture seule, `--dry-run`, `--force`, `--uninstall`, `--scope {global,workspace}`, `--workspace`, `--target`, `--method {copy,agy}`, `--plugin-root` / `--source`, `--skip-validate` / `--no-validate`, `--strict`) tout en conservant les options de liaison sidecar (`--link`, `--unlink`, `--slug`, `--home`, `--projects-dir`, `--sidecars-dir`, `--source-project-id`, `--project-id`, `--configure-config`, `--no-configure-config`, `--config-path`).
+
 ## Sécurité & isolation
 
 - **Feu vert unique :** aucune conversation distante (`dispatch=true`) n'est ouverte ou relancée sans validation humaine préalable (`approved=true`), laquelle couvre également l'éventuel callback retour *one-shot*.

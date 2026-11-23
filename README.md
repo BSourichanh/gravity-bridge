@@ -16,11 +16,19 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro d�
 ```powershell
 python install.py
 ```
-L'installeur copie `plugin/` vers `~/.gemini/config/plugins/gravity-bridge/`, adapte automatiquement `"python3"` sur la copie installée sous Windows si nécessaire et exécute `validate.py --strict`.
+L'installeur copie `plugin/` vers `~/.gemini/config/plugins/gravity-bridge/` (`--scope global`, défaut) ou `<workspace>/.agents/plugins/gravity-bridge/` (`--scope workspace --workspace <chemin>`), adapte automatiquement `"python3"` sur la copie installée sous Windows si nécessaire (`--method copy`) et exécute `validate.py --strict`.
 
-Options utiles :
-- `python install.py --dry-run` : simule l'installation sans écrire.
+Contrat CLI commun (11 drapeaux + options Bridge `--link` / `--unlink`) :
+- `python install.py --check` : inspection 100 % lecture seule (Python, `agy`, source, cible résolue, état et dérive éventuelle, zéro écriture disque).
+- `python install.py --dry-run` : simule les actions sans écrire sur le disque.
+- `python install.py --force` : autorise l'écrasement d'une cible occupée ou installation existante.
 - `python install.py --uninstall` : supprime le plugin installé (préserve `~/.gemini/gravity/bridge/bridge.db`).
+- `python install.py --scope {global,workspace} [--workspace PATH]` : choisit la portée (`workspace` exige `--workspace PATH`).
+- `python install.py --target PATH` : cible d'installation explicite (prioritaire sur `--scope`).
+- `python install.py --method {copy,agy}` : copie stdlib (`copy`, défaut) ou délégation à `agy plugin install` (`agy`, limité à `--scope global` sans `--target`).
+- `python install.py --plugin-root PATH` *(alias `--source`)* : dossier source du plugin (défaut `./plugin`).
+- `python install.py --skip-validate` *(alias rétrocompatible `--no-validate`)* : ignore la validation pré-installation (hors `--strict`).
+- `python install.py --strict` : impose la validation stricte (outrepasse `--skip-validate` et échoue sur avertissement en `--check`).
 
 *(Ou via CLI : `agy plugin validate ./plugin --strict` puis `agy plugin install ./plugin`.)*
 
