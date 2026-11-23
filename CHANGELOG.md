@@ -5,6 +5,8 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-24
+
 ### Added
 - **Contrat CLI `install.py` (11/11) :** ajout du drapeau `--no-fix-python` dans `build_parser()` et `install_plugin(..., no_fix_python=False)` pour ignorer `fix_python_cmd` (et le message `[DRY-RUN]` associé) sur la copie installée, avec tests dans `tests/test_install.py`.
 
