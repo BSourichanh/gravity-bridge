@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -288,6 +290,48 @@ class InstallTestCase(unittest.TestCase):
         self.assertEqual(
             installed_cfg["mcpServers"]["bridge"]["args"],
             ["-3", "-B", "${PLUGIN_ROOT}/mcp/server.py"],
+        )
+
+        repo_cfg = json.loads(
+            (PLUGIN_ROOT / "mcp_config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(repo_cfg["mcpServers"]["bridge"]["command"], "python3")
+
+    def test_no_fix_python_skips_fix_python_cmd_and_preserves_python3(self) -> None:
+        self.assertFalse(install_mod.build_parser().parse_args([]).no_fix_python)
+        self.assertTrue(
+            install_mod.build_parser().parse_args(["--no-fix-python"]).no_fix_python
+        )
+
+        dry_out = io.StringIO()
+        with contextlib.redirect_stdout(dry_out):
+            rc_dry = install_mod.main(
+                ["--target", str(self.target), "--no-fix-python", "--dry-run"]
+            )
+        self.assertEqual(rc_dry, 0)
+        self.assertNotIn("Adaptation éventuelle 'python3'", dry_out.getvalue())
+        self.assertFalse(self.target.exists())
+
+        with mock.patch.object(
+            validate_mod, "has_real_python3", return_value=False
+        ), mock.patch.object(
+            validate_mod, "_detect_portable_python_cmd", return_value="py -3"
+        ), mock.patch.object(
+            validate_mod, "fix_python_cmd", wraps=validate_mod.fix_python_cmd
+        ) as mock_fix, mock.patch.object(
+            install_mod, "_load_validate_module", return_value=validate_mod
+        ):
+            rc = install_mod.main(["--target", str(self.target), "--no-fix-python"])
+
+        self.assertEqual(rc, 0)
+        mock_fix.assert_not_called()
+        installed_cfg = json.loads(
+            (self.target / "mcp_config.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(installed_cfg["mcpServers"]["bridge"]["command"], "python3")
+        self.assertEqual(
+            installed_cfg["mcpServers"]["bridge"]["args"],
+            ["-B", "${PLUGIN_ROOT}/mcp/server.py"],
         )
 
         repo_cfg = json.loads(

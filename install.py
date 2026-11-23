@@ -328,6 +328,7 @@ def install_plugin(
     run_validate: bool = True,
     force: bool = False,
     method: str = "copy",
+    no_fix_python: bool = False,
 ) -> int:
     """Installe plugin/ vers target (copy ou agy), adapte python3 sur la copie et valide."""
     src = source.expanduser().resolve()
@@ -388,7 +389,8 @@ def install_plugin(
 
     if dry_run:
         print(f"[DRY-RUN] Copie : {src} -> {dst}")
-        print("[DRY-RUN] Adaptation éventuelle 'python3' sur la copie installée uniquement.")
+        if not no_fix_python:
+            print("[DRY-RUN] Adaptation éventuelle 'python3' sur la copie installée uniquement.")
         if run_validate:
             print(f"[DRY-RUN] Validation : validate.py --strict --plugin-root {dst}")
         return 0
@@ -398,8 +400,9 @@ def install_plugin(
         staged = Path(tmp) / dst.name
         shutil.copytree(src, staged, ignore=_ignore_copy)
 
-        validate_mod = _load_validate_module(staged)
-        validate_mod.fix_python_cmd(staged)
+        if not no_fix_python:
+            validate_mod = _load_validate_module(staged)
+            validate_mod.fix_python_cmd(staged)
 
         if run_validate:
             rc_val = _run_validate_subprocess(staged)
@@ -616,8 +619,8 @@ def unlink_workspace_cli(
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    _configure_stdio()
+def build_parser() -> argparse.ArgumentParser:
+    """Construit le parseur CLI de l'installeur Gravity Bridge."""
     parser = argparse.ArgumentParser(
         description="Installeur / désinstalleur et gestionnaire de liaison sidecar Gravity Bridge"
     )
@@ -745,10 +748,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Ignore la validation pré-installation (hors --strict ; alias --no-validate).",
     )
     parser.add_argument(
+        "--no-fix-python",
+        action="store_true",
+        help="Désactive l'adaptation 'python3' sur la copie installée (conserve mcp_config.json tel quel).",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Exige une validation stricte (force la validation et échoue sur avertissement en --check).",
     )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    _configure_stdio()
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.scope == "workspace" and args.workspace is None:
@@ -826,6 +840,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         run_validate=bool(args.strict or not args.skip_validate),
         force=args.force,
         method=args.method,
+        no_fix_python=args.no_fix_python,
     )
 
 
