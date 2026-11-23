@@ -5,6 +5,8 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
 ### Added
 - **Cure tokens D4 & références (`SKILL.md`, `rules/AGENTS.md`, `AGENTS.md`, `validate.py`) :**
   - Compaction de `plugin/skills/gravity-bridge/SKILL.md` (`<= 3 500 o`) avec extraction des exemples JSON et scénarios multi-tours dans `plugin/skills/gravity-bridge/references/examples.md`.

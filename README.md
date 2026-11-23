@@ -1,4 +1,4 @@
-# Gravity Bridge (`v0.2.0`)
+# Gravity Bridge (`v0.3.0`)
 
 Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro dépendance tierce, zéro CLI `agy`, zéro hook permanent) permettant la communication structurée et l'ouverture directe de conversations natives entre projets dans **Antigravity App**, sans jamais déposer de fichiers dans les dépôts suivis.
 

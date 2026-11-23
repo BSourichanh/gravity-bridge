@@ -30,7 +30,7 @@ from core.sidecar_manager import link_workspace_sidecar  # noqa: E402
 from core.store import BridgeStore, resolve_notify_caller  # noqa: E402
 
 SERVER_NAME = "gravity-bridge"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 
