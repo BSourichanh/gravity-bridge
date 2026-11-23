@@ -208,7 +208,7 @@ def build_callback_prompt(
     thread: Mapping[str, Any],
     message: Mapping[str, Any],
 ) -> str:
-    """Construit le prompt de callback retour one-shot vers caller_conversation_id (depth=1)."""
+    """Construit le prompt de callback retour vers caller_conversation_id (depth=1)."""
     thread_status = str(thread.get("status") or "done")
     header = (
         f"[GRAVITY-BRIDGE | CALLBACK | thread={thread['thread_id']} "
@@ -221,6 +221,16 @@ def build_callback_prompt(
     file_refs = message.get("file_refs") or []
     if file_refs:
         lines.append(f"Références fichiers : {', '.join(str(r) for r in file_refs)}")
+    if thread_status == "open":
+        status_note = (
+            f"- Réponse intermédiaire / question de '{thread['to_workspace']}' sur un fil toujours ouvert ; "
+            "une relance éventuelle passe par reply_thread(..., dispatch=true) après arbitrage "
+            "(ne pas re-dispatcher automatiquement)."
+        )
+    else:
+        status_note = (
+            f"- Fil clôturé par '{thread['to_workspace']}' ; ne pas re-dispatcher automatiquement (anti-boucle)."
+        )
     lines.extend(
         [
             "",
@@ -228,7 +238,7 @@ def build_callback_prompt(
             "",
             "---",
             "Rappel callback retour (depth=1) :",
-            f"- Fil clôturé par '{thread['to_workspace']}' ; ne pas re-dispatcher automatiquement (anti-boucle).",
+            status_note,
             (
                 f"- Utiliser read_thread(thread_id=\"{thread['thread_id']}\", "
                 f"reader_workspace=\"{thread['from_workspace']}\") pour consulter le fil complet si besoin."

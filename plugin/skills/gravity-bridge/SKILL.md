@@ -6,53 +6,29 @@ description: >-
   uniquement sur /gravity-bridge [workspaces|link|send|read|take|reply|status|done|prune].
 ---
 
-# Gravity Bridge — Communication Inter-Projets Antigravity App
+# Gravity Bridge
 
 ## Règles strictes
 
-1. **Résolution explicite du workspace :** déduire le workspace actif depuis `Active Workspaces` dans votre contexte et passer explicitement son slug ou son chemin absolu (`from_workspace`, `workspace`, `reader_workspace`). Ne jamais supposer un workspace par défaut en contexte multi-racines.
-2. **Feu vert humain unique :** avant tout `send_message(..., dispatch=true)`, `reply_thread(..., dispatch=true)` ou `dispatch_thread`, présenter à l'utilisateur le ou les workspaces cibles, le `msg_type`, la posture attendue (lecture seule pour `question`/`info`, exécution encadrée pour `handoff`), l'objet et les `file_refs`, puis attendre sa confirmation explicite (une validation groupée suffit en multi-cibles) avant de passer `approved=true, dispatch=true`. Passer `caller_conversation_id` s'il est connu dans le contexte ; ce feu vert unique couvre l'envoi initial (`outbound`) **et** l'éventuel callback retour *one-shot* (`notify_caller`, résolu *Auto si prêt* lorsqu'il est omis avec un `caller_conversation_id` et un sidecar appelant `online`, ou avertissement non bloquant si `notify_caller=true` avec sidecar appelant `offline`/`unlinked`).
-3. **Fail-fast sidecar :** si un dispatch échoue parce que le micro-sidecar cible est `unlinked` ou `offline`, expliquer immédiatement la cause et proposer soit un dépôt passif (`dispatch=false`), soit `/gravity-bridge link <slug>` et l'activation dans Antigravity App.
-4. **Isolation & plafonds :** stockage centralisé exclusivement hors des dépôts cibles (`$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db`) ; ne jamais coller de gros fichiers ni de secrets dans `body` (plafond 32 Ko UTF-8) ; référencer les fichiers concernés via `file_refs` relatifs au dépôt cible (max 20 entrées).
-5. **Anti-boucle :** dans toute conversation ouverte par Gravity Bridge (`depth=1` dans le prompt ou `GRAVITY_BRIDGE_DEPTH >= 1`), tout sous-dispatch est strictement interdit ; répondre uniquement via `reply_thread(..., dispatch=false, conversation_id=...)`. Lorsqu'un fil est clôturé par la cible (`close=true, dispatch=false`), le serveur MCP déclenche seul l'éventuel callback retour *one-shot* vers `caller_conversation_id` si le sidecar appelant est `online` (sinon `callback_status="skipped_sidecar_*"` sans erreur).
-6. **Réponses synthétiques :** limiter les résumés par défaut à **≤ 12 lignes** en Markdown clair (tableau ou puces).
+1. **Workspace explicite :** déduire le workspace actif depuis `Active Workspaces` et passer son slug ou chemin absolu (`from_workspace`, `workspace`, `reader_workspace`).
+2. **Feu vert humain unique :** avant `send_message(..., dispatch=true)`, `reply_thread(..., dispatch=true)` ou `dispatch_thread`, présenter cible(s), `msg_type`, posture (`question`/`info` lecture seule, `handoff` exécution encadrée), objet et `file_refs`, puis attendre confirmation avant `approved=true, dispatch=true`. Passer `caller_conversation_id` si connu ; ce feu vert couvre envoi et callbacks (`notify_caller`, *Auto si prêt* si omis avec sidecar appelant `online`, sinon avertissement si `notify_caller=true`).
+3. **Fail-fast sidecar :** si la cible est `unlinked`/`offline`, expliquer la cause et proposer dépôt passif (`dispatch=false`) ou `/gravity-bridge link <slug>`.
+4. **Isolation & plafonds :** stockage centralisé (`$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db`) ; zéro secret ni gros fichier dans `body` (<= 32 Ko UTF-8) ; `file_refs` relatifs (<= 20).
+5. **Anti-boucle & callbacks :** sous `depth >= 1` (`GRAVITY_BRIDGE_DEPTH >= 1`), aucun sous-dispatch ; répondre via `reply_thread(..., dispatch=false, conversation_id=...)`. Si une réponse cible `close=false` clôt un job outbound actif, le serveur enfile un callback intermédiaire `status=open` (sans `callback_dispatched_at`) ; à la clôture (`close=true`), il déclenche le callback final *one-shot* `status=done` si sidecar appelant `online` (sinon `skipped_sidecar_*`).
+6. **Synthèse :** résumés par défaut **<= 12 lignes** Markdown.
 
-## Routage des commandes
+## Outils MCP (`gravity-bridge_bridge`) & Routage
 
-### 1. `/gravity-bridge` *(défaut)*
-1. Appeler `register_workspace(path="<workspace_actif>")` s'il n'est pas encore enregistré, puis `list_workspaces()` pour l'état des sidecars (`online`/`offline`/`unlinked`).
-2. Appeler `list_inbox(workspace="<slug>", direction="inbox", status="open")` et `manage_thread(action="get_job")`.
-3. Afficher un résumé compact (≤ 12 lignes) des sidecars, messages `unread`/`open` et jobs actifs/récents.
+| Commande | Outils MCP | Action |
+| :--- | :--- | :--- |
+| `(défaut)` | `register_workspace`, `list_workspaces`, `list_inbox`, `manage_thread` | Enregistre workspace actif et résume sidecars, messages `open` et jobs |
+| `workspaces` | `list_workspaces`, `register_workspace` | Liste workspaces et statuts sidecar (`online`/`offline`/`unlinked`) |
+| `link <slug> [path]` | `register_workspace`, `link_workspace` | Crée `sidecar.json` + `<nom> (Bridge)` et active `config.json` (`uninstall=true` pour délier) |
+| `send <cible> ...` | `send_message`, `dispatch_thread` | Crée un fil (`question`\|`handoff`\|`info`), ouvre la conv si `dispatch=true` (ou dépôt passif) |
+| `read <id>` | `read_thread` | Lit le fil (`mark_read=True`), messages, `target_conversation_id` et dernier job |
+| `take <id>` | `read_thread`, `reply_thread` | Si `handoff` et `approved=true`, exécute sous `AGENTS.md` local puis clôt (`close=True, dispatch=False`) |
+| `reply <id>` | `reply_thread` | Répond (`--close`, ou `--dispatch` sens `from -> to` avec `approved=true`) |
+| `status [job]` | `manage_thread` | `get_job` ou `cancel_job` (`queued`/`claimed`/`dispatched`/`completed`/`failed`/`cancelled`) |
+| `done` / `prune` | `manage_thread` | `close` un fil ou `prune_done` (`older_than_days`) |
 
-### 2. `/gravity-bridge workspaces`
-- Appeler `list_workspaces()`. Si un chemin est fourni, appeler `register_workspace(path=...)` au préalable.
-
-### 3. `/gravity-bridge link <slug> [chemin]`
-1. Si un chemin est fourni, appeler `register_workspace(path=..., slug=...)` au préalable.
-2. Appeler `link_workspace(workspace="<slug>")` (ou `uninstall=true` si déliaison demandée). L'outil génère `sidecar.json`, crée ou met à jour un **projet sidecar dédié `<nom> (Bridge)`** dans `~/.gemini/config/projects/*.json` (en recopiant `projectResources`, `settings` et `permissionGrants` du projet utilisateur détecté, ou en rattachant le dossier local s'il n'existe pas encore), active le sidecar dans `~/.gemini/config/config.json` (`"schemaVersion": 1`) et répare tout projet utilisateur précédemment marqué `"sidecar"`. Ainsi, votre projet utilisateur reste toujours visible dans `Projects` même avec `0` conversation, tandis que `<nom> (Bridge)` s'affiche uniquement lorsqu'une conversation Bridge est ouverte.
-3. Si des projets utilisateur ont été réparés, informer l'utilisateur de recharger/redémarrer Antigravity App ; sinon confirmer l'activation et vérifier `online` via `/gravity-bridge workspaces`.
-
-### 4. `/gravity-bridge send <cible> [question|handoff|info] <objet>`
-1. Rédiger un brief autonome concis avec `file_refs` relatifs (sans dupliquer le contenu complet des fichiers).
-2. Si une création de conversation (`dispatch=true`) est demandée, obtenir le feu vert humain unique puis appeler `send_message(..., approved=true, dispatch=true, caller_conversation_id=..., notify_caller=...)` (`notify_caller` optionnel, résolu *Auto si prêt* si omis).
-3. Sinon (ou en repli si sidecar hors ligne), déposer passivement dans la boîte aux lettres avec `send_message(..., dispatch=false)`.
-
-### 5. `/gravity-bridge read <thread_id>`
-- Appeler `read_thread(thread_id=..., reader_workspace="<slug>", mark_read=True)`.
-- Afficher les métadonnées (`target_conversation_id`, `target_sidecar_status`), les messages chronologiques et le statut du dernier job.
-
-### 6. `/gravity-bridge take <thread_id>` *(depuis le projet cible dans Antigravity App)*
-1. Appeler `read_thread(thread_id=..., reader_workspace="<slug>", mark_read=True)`.
-2. Si `msg_type == "handoff"` et `approved == true`, exécuter le lot dans le périmètre et sous les règles du dépôt courant (sans redemander de confirmation manuelle). Sinon, présenter le contenu et demander confirmation avant d'agir.
-3. Clôturer en envoyant le rapport concis via `reply_thread(thread_id=..., from_workspace="<slug>", body=..., conversation_id=..., close=True, dispatch=False)`.
-
-### 7. `/gravity-bridge reply <thread_id>`
-- Appeler `reply_thread(thread_id=..., from_workspace="<slug>", body=..., conversation_id=..., close=<--close>, dispatch=<--dispatch>, approved=...)`.
-- Si `--dispatch` est demandé, obtenir confirmation unique au préalable (`approved=true`) ; le re-dispatch est réservé au sens initial `from_workspace -> to_workspace` et poursuit `target_conversation_id` via `agentapi send-message`.
-
-### 8. `/gravity-bridge status [job_id]`
-- Appeler `manage_thread(action="get_job", job_id=...)` (ou `cancel_job` si annulation demandée) et résumer l'avancement (`queued`, `claimed`, `dispatched`, `completed`, `failed`, `cancelled`).
-
-### 9. `/gravity-bridge done <thread_id>` · `prune`
-- `done <thread_id>` : appeler `manage_thread(action="close", thread_id=...)`.
-- `prune [days]` : appeler `manage_thread(action="prune_done", older_than_days=...)`.
+Exemples JSON et scénarios détaillés : [references/examples.md](references/examples.md).

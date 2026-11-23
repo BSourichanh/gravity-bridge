@@ -571,11 +571,12 @@ class TestThreadsInboxAndReplies(StoreTestCase):
         )
         self.assertFalse(t_disabled["notify_caller"])
 
-        # Garde-fous : close=False, expéditeur!=to_workspace, same_conv, approved=False -> aucun callback.
+        # Garde-fous : close=False SANS job outbound dispatched actif, expéditeur!=to_workspace, same_conv -> aucun callback.
         rep_open = self.store.add_reply(
             t_auto["thread_id"], "metrics", "En cours.", close=False, conversation_id=target_conv, now=now
         )
         self.assertNotIn("callback_status", rep_open)
+        self.assertNotIn("callback_job", rep_open)
         rep_from_caller = self.store.add_reply(
             t_auto["thread_id"], "architect", "Précision.", close=True, now=now
         )
@@ -653,6 +654,112 @@ class TestThreadsInboxAndReplies(StoreTestCase):
         self.assertFalse(self.store.is_target_conversation_id(caller_conv))
         self.assertNotIn(caller_conv, self.store.list_target_conversation_ids())
         self.assertTrue(self.store.is_target_conversation_id(target_conv))
+
+    def test_callback_intermediate_open_reply_and_final_close_multiturn(self) -> None:
+        now = datetime.now(timezone.utc)
+        caller_conv = "44444444-4444-4444-8444-444444444444"
+        target_conv = "55555555-5555-4555-8555-555555555555"
+
+        self.store.record_sidecar_heartbeat(
+            "architect", sidecar_id="gravity-bridge-architect", pid=os.getpid(), now=now
+        )
+        self.store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid(), now=now
+        )
+        created = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Multi-tours callback",
+            "Exécuter étape 1.",
+            approved=True,
+            caller_conversation_id=caller_conv,
+            now=now,
+        )
+        tid = created["thread_id"]
+
+        # 1. Dispatch outbound actif -> réponse cible close=False déclenche callback status=open sans callback_dispatched_at.
+        out1 = self.store.create_job(tid, created["message_id"], "metrics", now=now)
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.store.mark_job_dispatched(out1["id"], target_conversation_id=target_conv, now=now)
+
+        rep_q = self.store.add_reply(
+            tid,
+            "metrics",
+            "Question : valider option A ou B ?",
+            close=False,
+            conversation_id=target_conv,
+            now=now,
+        )
+        self.assertEqual(rep_q["status"], "open")
+        self.assertEqual(rep_q["completed_job_ids"], [out1["id"]])
+        self.assertEqual(rep_q["callback_status"], "queued")
+        cb1 = rep_q["callback_job"]
+        self.assertEqual(cb1["direction"], "callback")
+        self.assertEqual(cb1["target_workspace"], "architect")
+        self.assertEqual(cb1["target_conversation_id"], caller_conv)
+
+        detail_mid = self.store.read_thread(tid, reconcile=False)
+        self.assertEqual(detail_mid["status"], "open")
+        self.assertIsNone(detail_mid["callback_dispatched_at"])
+
+        claimed_cb1 = self.store.claim_next_job(
+            "architect", sidecar_id="gravity-bridge-architect", now=now
+        )
+        self.assertIsNotNone(claimed_cb1)
+        self.store.complete_job(cb1["id"], status="completed", exit_code=0, now=now)
+
+        # 2. Deuxième reply close=False sans nouveau job outbound dispatched -> AUCUN callback.
+        rep_spam = self.store.add_reply(
+            tid,
+            "metrics",
+            "Complément sans nouveau dispatch.",
+            close=False,
+            conversation_id=target_conv,
+            now=now,
+        )
+        self.assertEqual(rep_spam["status"], "open")
+        self.assertEqual(rep_spam["completed_job_ids"], [])
+        self.assertNotIn("callback_status", rep_spam)
+        self.assertNotIn("callback_job", rep_spam)
+
+        # 3. Relance outbound par l'appelant -> nouvelle réponse cible close=True -> callback final status=done + callback_dispatched_at.
+        rep_followup = self.store.add_reply(
+            tid,
+            "architect",
+            "Prendre option A.",
+            close=False,
+            now=now,
+        )
+        out2 = self.store.create_job(
+            tid, rep_followup["message_id"], "metrics", action="send_message", now=now
+        )
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.store.mark_job_dispatched(out2["id"], target_conversation_id=target_conv, now=now)
+
+        rep_final = self.store.add_reply(
+            tid,
+            "metrics",
+            "Option A appliquée et validée.",
+            close=True,
+            conversation_id=target_conv,
+            now=now,
+        )
+        self.assertEqual(rep_final["status"], "done")
+        self.assertEqual(rep_final["completed_job_ids"], [out2["id"]])
+        self.assertEqual(rep_final["callback_status"], "queued")
+        cb2 = rep_final["callback_job"]
+        self.assertEqual(cb2["direction"], "callback")
+        self.assertNotEqual(cb2["id"], cb1["id"])
+
+        detail_end = self.store.read_thread(tid, reconcile=False)
+        self.assertEqual(detail_end["status"], "done")
+        self.assertIsNotNone(detail_end["callback_dispatched_at"])
+
+        # Anti-rejeu après clôture définitive.
+        rep_after = self.store.add_reply(tid, "metrics", "Post-clôture.", close=True, now=now)
+        self.assertNotIn("callback_status", rep_after)
+        self.assertNotIn("callback_job", rep_after)
 
 
 class TestJobsAndReconciliation(StoreTestCase):

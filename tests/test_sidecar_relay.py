@@ -389,6 +389,62 @@ class SidecarRelayTestCase(unittest.TestCase):
         self.assertNotIn(caller_conv, self.store.list_target_conversation_ids())
         self.assertEqual(self.store.get_job(cb_fail_job["id"], reconcile=False)["status"], "failed")
 
+    def test_callback_open_intermediate_prompt_formatting(self) -> None:
+        self._write_scenario({})
+        caller_conv = "cccccccc-1111-4111-8111-cccccccccccc"
+        target_conv = "dddddddd-2222-4222-8222-dddddddddddd"
+
+        self.store.record_sidecar_heartbeat(
+            "architect", sidecar_id="gravity-bridge-architect", pid=os.getpid()
+        )
+        created = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Callback Open",
+            "Exécuter le lot.",
+            approved=True,
+            caller_conversation_id=caller_conv,
+        )
+        tid = created["thread_id"]
+        out_job = self.store.create_job(tid, created["message_id"], "metrics")
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics")
+        self.store.mark_job_dispatched(out_job["id"], target_conversation_id=target_conv)
+
+        replied = self.store.add_reply(
+            tid,
+            "metrics",
+            "Blocage : choisir le schéma A ou B.",
+            close=False,
+            conversation_id=target_conv,
+        )
+        self.assertEqual(replied["status"], "open")
+        self.assertEqual(replied["callback_status"], "queued")
+
+        cb_env = self._env()
+        res = process_one_job(
+            self.store,
+            "architect",
+            sidecar_id="gravity-bridge-architect",
+            agentapi_bin=str(self.fake_agentapi),
+            env=cb_env,
+        )
+        self.assertIsNotNone(res)
+        assert res is not None
+        self.assertEqual(res["status"], "completed")
+
+        call_open = json.loads((self.capture_dir / "call_1.json").read_text(encoding="utf-8"))
+        prompt_sent = call_open["argv"][-1]
+        self.assertTrue(
+            prompt_sent.startswith(
+                f"[GRAVITY-BRIDGE | CALLBACK | thread={tid} | from=metrics | status=open | depth=1]"
+            )
+        )
+        self.assertIn("fil toujours ouvert", prompt_sent.lower())
+        self.assertIn("reply_thread(..., dispatch=true)", prompt_sent)
+        self.assertNotIn("Fil clôturé", prompt_sent)
+        self.assertIsNone(self.store.read_thread(tid, reconcile=False)["callback_dispatched_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

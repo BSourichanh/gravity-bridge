@@ -408,7 +408,21 @@ def _validate_skills(root: Path, report: Report) -> None:
         report.error("skills/gravity-bridge/SKILL.md introuvable.")
         return
 
-    txt = skill_md.read_text(encoding="utf-8", errors="replace")
+    raw_bytes = skill_md.read_bytes()
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        report.error("skills/gravity-bridge/SKILL.md ne doit pas contenir de BOM UTF-8.")
+    if b"\r\n" in raw_bytes:
+        report.error(
+            "skills/gravity-bridge/SKILL.md doit utiliser des fins de ligne LF (CRLF détecté)."
+        )
+    if len(raw_bytes) > 3500:
+        report.error(f"skills/gravity-bridge/SKILL.md dépasse 3500 octets ({len(raw_bytes)}).")
+
+    examples_md = skills_dir / "gravity-bridge" / "references" / "examples.md"
+    if not examples_md.is_file():
+        report.error("Fichier requis manquant : skills/gravity-bridge/references/examples.md")
+
+    txt = raw_bytes.decode("utf-8-sig", errors="replace")
     fm_match = re.match(r"^\s*---\r?\n(.*?)\r?\n---\r?\n", txt, re.DOTALL)
     if not fm_match:
         report.error("skills/gravity-bridge/SKILL.md : frontmatter YAML manquant.")
@@ -431,10 +445,16 @@ def _validate_rules_and_no_hooks(root: Path, report: Report) -> None:
         return
 
     raw_bytes = rules_file.read_bytes()
-    if len(raw_bytes) >= 2048:
-        report.error(f"rules/AGENTS.md dépasse 2048 octets ({len(raw_bytes)}).")
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        report.error("rules/AGENTS.md ne doit pas contenir de BOM UTF-8.")
+    if b"\r\n" in raw_bytes:
+        report.error("rules/AGENTS.md doit utiliser des fins de ligne LF (CRLF détecté).")
+    if len(raw_bytes) > 1000:
+        report.error(f"rules/AGENTS.md dépasse 1000 octets ({len(raw_bytes)}).")
+    elif len(raw_bytes) > 600:
+        report.warn(f"rules/AGENTS.md dépasse 600 octets ({len(raw_bytes)} <= 1000).")
 
-    rules_txt = raw_bytes.decode("utf-8", errors="replace")
+    rules_txt = raw_bytes.decode("utf-8-sig", errors="replace")
     if rules_txt.lstrip().startswith("---"):
         report.error("rules/AGENTS.md ne doit pas contenir de frontmatter YAML.")
 
@@ -443,6 +463,21 @@ def _validate_rules_and_no_hooks(root: Path, report: Report) -> None:
         report.error(
             f"rules/AGENTS.md doit rester minimal (<= 5 lignes non vides, trouvé {len(non_empty_lines)})."
         )
+
+
+def _validate_repo_agents_md(root: Path, report: Report) -> None:
+    if root.name != "plugin":
+        return
+    repo_agents = root.parent / "AGENTS.md"
+    if not repo_agents.is_file():
+        return
+    raw_bytes = repo_agents.read_bytes()
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        report.error("AGENTS.md racine ne doit pas contenir de BOM UTF-8.")
+    if b"\r\n" in raw_bytes:
+        report.error("AGENTS.md racine doit utiliser des fins de ligne LF (CRLF détecté).")
+    if len(raw_bytes) > 2500:
+        report.error(f"AGENTS.md racine dépasse 2500 octets ({len(raw_bytes)}).")
 
 
 def _validate_mcp_config(root: Path, report: Report) -> None:
@@ -584,6 +619,7 @@ def validate_plugin(root: Path, report: Report) -> None:
     _validate_module_contract(root, report)
     _validate_skills(root, report)
     _validate_rules_and_no_hooks(root, report)
+    _validate_repo_agents_md(root, report)
     _validate_mcp_config(root, report)
 
     for sub in ("assets", "config", "core", "mcp", "rules", "scripts", "skills"):

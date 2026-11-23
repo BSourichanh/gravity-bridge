@@ -204,6 +204,61 @@ class ValidateTestCase(unittest.TestCase):
         self.assertIn("signals.produces", joined)
         self.assertIn("signals.consumes", joined)
 
+    def test_d4_rules_thresholds_bom_crlf_skill_and_repo_agents(self) -> None:
+        # 1. rules/AGENTS.md entre 601 et 1000 octets -> warning uniquement (échoue en --strict).
+        copy_warn = self._copy_plugin("rules-warn")
+        (copy_warn / "rules" / "AGENTS.md").write_bytes(b"# Rule\n" + (b"a" * 650) + b"\n")
+        rep_warn = validate_mod.Report()
+        validate_mod.validate_plugin(copy_warn, rep_warn)
+        self.assertEqual(rep_warn.errors, [], rep_warn.errors)
+        self.assertTrue(any("600 octets" in w for w in rep_warn.warnings), rep_warn.warnings)
+        self.assertTrue(rep_warn.ok(strict=False))
+        self.assertFalse(rep_warn.ok(strict=True))
+
+        # 2. rules/AGENTS.md > 1000 octets, BOM et CRLF -> erreurs.
+        copy_bad_rules = self._copy_plugin("rules-err")
+        (copy_bad_rules / "rules" / "AGENTS.md").write_bytes(
+            b"\xef\xbb\xbf# Rule\r\n" + (b"b" * 1010) + b"\r\n"
+        )
+        rep_bad_rules = validate_mod.Report()
+        validate_mod.validate_plugin(copy_bad_rules, rep_bad_rules)
+        joined_rules = "\n".join(rep_bad_rules.errors)
+        self.assertIn("BOM UTF-8", joined_rules)
+        self.assertIn("CRLF", joined_rules)
+        self.assertIn("1000 octets", joined_rules)
+
+        # 3. SKILL.md > 3500 octets, BOM, CRLF et references/examples.md manquant -> erreurs.
+        copy_bad_skill = self._copy_plugin("skill-err")
+        skill_path = copy_bad_skill / "skills" / "gravity-bridge" / "SKILL.md"
+        skill_path.write_bytes(
+            b"\xef\xbb\xbf---\r\nname: gravity-bridge\r\ndescription: test\r\n---\r\n"
+            + (b"x" * 3550)
+            + b"\r\n"
+        )
+        (copy_bad_skill / "skills" / "gravity-bridge" / "references" / "examples.md").unlink()
+        rep_bad_skill = validate_mod.Report()
+        validate_mod.validate_plugin(copy_bad_skill, rep_bad_skill)
+        joined_skill = "\n".join(rep_bad_skill.errors)
+        self.assertIn("SKILL.md ne doit pas contenir de BOM", joined_skill)
+        self.assertIn("SKILL.md doit utiliser des fins de ligne LF", joined_skill)
+        self.assertIn("3500 octets", joined_skill)
+        self.assertIn("references/examples.md", joined_skill)
+
+        # 4. AGENTS.md racine (lorsque root.name == "plugin") > 2500 octets, BOM, CRLF -> erreurs.
+        repo_sim = self.root / "repo-sim"
+        repo_sim.mkdir(parents=True, exist_ok=True)
+        sim_plugin = repo_sim / "plugin"
+        shutil.copytree(PLUGIN_ROOT, sim_plugin, ignore=_ignore_pycache)
+        (repo_sim / "AGENTS.md").write_bytes(
+            b"\xef\xbb\xbf# Agents\r\n" + (b"z" * 2550) + b"\r\n"
+        )
+        rep_repo = validate_mod.Report()
+        validate_mod.validate_plugin(sim_plugin, rep_repo)
+        joined_repo = "\n".join(rep_repo.errors)
+        self.assertIn("AGENTS.md racine ne doit pas contenir de BOM", joined_repo)
+        self.assertIn("AGENTS.md racine doit utiliser des fins de ligne LF", joined_repo)
+        self.assertIn("2500 octets", joined_repo)
+
 
 if __name__ == "__main__":
     unittest.main()

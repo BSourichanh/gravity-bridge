@@ -9,8 +9,8 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CL
 - `/gravity-bridge link <slug> [chemin]` : génère `~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`, crée ou met à jour son projet sidecar dédié `<nom> (Bridge)` dans `~/.gemini/config/projects/*.json` (miroir des dossiers/réglages/permissions du projet utilisateur, qui reste intact et toujours visible même vide) et l'active dans `~/.gemini/config/config.json` (`"schemaVersion": 1`).
 - `/gravity-bridge send <cible> [question|handoff|info] <objet>` : compose un brief autonome avec `file_refs` relatifs ; demande un feu vert humain unique avant `dispatch=true` (fail-fast si sidecar cible non `online`) et résout `notify_caller` (*Auto si prêt* ou explicite) pour le callback retour *one-shot*.
 - `/gravity-bridge read <thread_id>` : affiche le fil complet, les messages, `target_conversation_id`, `target_sidecar_status` et le dernier job.
-- `/gravity-bridge take <thread_id>` : prend en charge un `handoff` depuis le projet cible et clôture via `reply_thread(..., close=True, dispatch=False)` (ce qui déclenche côté serveur l'éventuel callback retour *one-shot* vers `caller_conversation_id`).
-- `/gravity-bridge reply <thread_id>` : répond au fil (`--close` ou `--dispatch` pour poursuivre la conversation cible via `agentapi send-message`).
+- `/gravity-bridge take <thread_id>` : prend en charge un `handoff` depuis le projet cible ; répond via `reply_thread(..., close=False, dispatch=False)` en cas de blocage/question (callback intermédiaire `status=open` si un job outbound actif vient d'être complété) et clôture via `close=True` (callback final *one-shot* `status=done`).
+- `/gravity-bridge reply <thread_id>` : répond au fil (`--close`, ou `--dispatch` pour poursuivre la conversation cible via `agentapi send-message`).
 - `/gravity-bridge status [job_id]` : suit l'avancement des jobs (`queued`, `claimed`, `dispatched`, `completed`, `failed`, `cancelled`) ou annule un job (`cancel_job`).
 - `/gravity-bridge done <thread_id>` · `prune` : clôture un fil ou purge manuellement les vieux fils `done` et leurs logs.
 

@@ -1373,15 +1373,16 @@ class BridgeStore:
                     and effective_conv is not None
                     and str(caller_conv).casefold() == str(effective_conv).casefold()
                 )
-                if (
-                    close
-                    and is_target_reply
+                should_notify = (
+                    is_target_reply
                     and bool(row["notify_caller"])
                     and bool(row["approved"])
                     and bool(caller_conv)
                     and not same_conv
                     and row["callback_dispatched_at"] is None
-                ):
+                    and (close or bool(completed_job_ids))
+                )
+                if should_notify:
                     pending_row = conn.execute(
                         "SELECT 1 FROM jobs WHERE thread_id = ? AND status IN ('queued', 'claimed') LIMIT 1",
                         (tid,),
@@ -1397,10 +1398,11 @@ class BridgeStore:
                             else "unlinked"
                         )
                         if caller_sidecar_status == "online":
-                            conn.execute(
-                                "UPDATE threads SET callback_dispatched_at = ? WHERE id = ?",
-                                (now_iso, tid),
-                            )
+                            if close:
+                                conn.execute(
+                                    "UPDATE threads SET callback_dispatched_at = ? WHERE id = ?",
+                                    (now_iso, tid),
+                                )
                             cb_job_id = self._next_unique_id(conn, "jobs", "job", now_dt)
                             conn.execute(
                                 """

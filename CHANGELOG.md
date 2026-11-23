@@ -6,6 +6,13 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 ## [Unreleased]
 
 ### Added
+- **Cure tokens D4 & références (`SKILL.md`, `rules/AGENTS.md`, `AGENTS.md`, `validate.py`) :**
+  - Compaction de `plugin/skills/gravity-bridge/SKILL.md` (`<= 3 500 o`) avec extraction des exemples JSON et scénarios multi-tours dans `plugin/skills/gravity-bridge/references/examples.md`.
+  - Compaction de `plugin/rules/AGENTS.md` (`<= 420 o`, `<= 5` lignes non vides) et `AGENTS.md` racine (`<= 1 650 o`) sans perte d'invariant.
+  - Contrôles D4 dans `plugin/scripts/validate.py` : seuils `600`/`1 000 o`, BOM, CRLF et frontmatter sur `rules/AGENTS.md` ; seuil `<= 3 500 o`, BOM, CRLF et présence de `references/examples.md` sur `SKILL.md` ; seuil `<= 2 500 o`, BOM et CRLF sur `AGENTS.md` racine (lorsque `root.name == "plugin"`).
+- **Callback appelant sur réponse cible intermédiaire `close=false` (`core/store.py`, `scripts/sidecar_relay.py`, `mcp/server.py`) :**
+  - Enfile un job `direction='callback'` avec fil toujours `open` (et sans poser `callback_dispatched_at`) lorsqu'une réponse cible `close=False` clôt un job outbound `dispatched` actif, tout en préservant le verrouillage anti-boucle (aucun callback sans job outbound actif) et le callback final *one-shot* à la clôture `close=True`.
+  - Adaptation du pied de prompt callback dans `build_callback_prompt` lorsque `status=open` (indique la possibilité de relance via `reply_thread(..., dispatch=true)` après arbitrage) et extension des tests (`tests/test_store.py`, `tests/test_sidecar_relay.py`, `tests/test_validate.py`) ainsi que `README.md` et `plugin/README.md`.
 - **Contrat CLI commun `install.py` (11 drapeaux) :**
   - Ajout de `--check` (inspection 100 % lecture seule : Python, `agy`, source, cible résolue, état et détection de dérive, zéro écriture disque), `--force` (écrasement cible occupée), `--scope {global,workspace}`, `--workspace PATH`, `--method {copy,agy}` (avec rejet CLI code `2` pour `--method agy` hors `--scope global` ou avec `--target`, et pour `--scope workspace` sans `--workspace`), `--plugin-root` (alias de `--source`), `--skip-validate` (avec conservation de `--no-validate` en alias rétrocompatible) et `--strict`.
   - Extension de `tests/test_install.py` dans `TemporaryDirectory` couvrant tous les nouveaux drapeaux sans toucher `~/.gemini/`, et mise à jour de `README.md` et `plugin/README.md`.

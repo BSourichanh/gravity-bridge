@@ -316,7 +316,8 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             "description": (
                 "Ajoute une réponse à un fil existant, marque les messages adverses lus, "
                 "clôt automatiquement tout job dispatched si émis par la cible, déclenche l'éventuel callback "
-                "retour one-shot si close=true et peut relancer la conversation App si dispatch=true."
+                "retour (final si close=true, intermédiaire si close=false après un job outbound actif) "
+                "et peut relancer la conversation App si dispatch=true."
             ),
             "inputSchema": {
                 "type": "object",
