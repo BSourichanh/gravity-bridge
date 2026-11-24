@@ -13,6 +13,14 @@ import secrets
 import sqlite3
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from core.batches import (
+    STALE_DISPATCHED_ERROR_SUMMARY,
+    evaluate_batch_callback,
+    find_stale_dispatched_jobs,
+    summarize_batch,
+    validate_batch_id,
+    validate_callback_mode,
+)
 from core.security import (
     CLAIM_GRACE_SECONDS,
     MAX_BODY_BYTES,
@@ -92,6 +100,8 @@ CREATE TABLE IF NOT EXISTS threads (
     caller_conversation_id TEXT,
     notify_caller          INTEGER NOT NULL DEFAULT 0 CHECK (notify_caller IN (0, 1)),
     callback_dispatched_at TEXT,
+    batch_id               TEXT,
+    callback_mode          TEXT NOT NULL DEFAULT 'per_thread' CHECK (callback_mode IN ('per_thread', 'on_batch_complete')),
     created_at             TEXT NOT NULL,
     updated_at             TEXT NOT NULL
 );
@@ -111,6 +121,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_threads_to_status     ON threads(to_workspace, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_from_status   ON threads(from_workspace, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_threads_batch_id      ON threads(batch_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread       ON messages(thread_id, id ASC);
 CREATE INDEX IF NOT EXISTS idx_jobs_target_status    ON jobs(target_workspace, status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_jobs_thread_status    ON jobs(thread_id, status, created_at DESC);
@@ -432,6 +443,8 @@ class BridgeStore:
                 ("notify_caller", "INTEGER NOT NULL DEFAULT 0 CHECK (notify_caller IN (0, 1))"),
                 ("callback_dispatched_at", "TEXT"),
                 ("workflow_profile", "TEXT NOT NULL DEFAULT 'none' CHECK (workflow_profile IN ('none', 'quick', 'standard', 'deep', 'evo'))"),
+                ("batch_id", "TEXT"),
+                ("callback_mode", "TEXT NOT NULL DEFAULT 'per_thread' CHECK (callback_mode IN ('per_thread', 'on_batch_complete'))"),
             ):
                 if col_name not in thread_cols:
                     conn.execute(f"ALTER TABLE threads ADD COLUMN {col_name} {col_type}")
@@ -904,6 +917,8 @@ class BridgeStore:
         caller_conversation_id: Optional[str] = None,
         notify_caller: Optional[bool] = None,
         workflow: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        callback_mode: Optional[str] = None,
         *,
         now: Optional[datetime] = None,
         pid_checker: Optional[Callable[[int], bool]] = None,
@@ -911,6 +926,8 @@ class BridgeStore:
         """Crée un nouveau fil typé et son message initial #1."""
         valid_type = validate_msg_type(msg_type, allow_reply=False)
         valid_workflow = validate_workflow_profile(workflow, msg_type=valid_type)
+        valid_batch_id = validate_batch_id(batch_id)
+        valid_callback_mode = validate_callback_mode(callback_mode, batch_id=valid_batch_id)
         valid_subject = validate_subject(subject)
         valid_body = validate_body(body)
         valid_refs = validate_file_refs(file_refs)
@@ -948,9 +965,9 @@ class BridgeStore:
                         id, from_workspace, to_workspace, msg_type, workflow_profile, subject,
                         status, approved, target_conversation_id,
                         caller_conversation_id, notify_caller, callback_dispatched_at,
-                        created_at, updated_at
+                        batch_id, callback_mode, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?, NULL, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?, NULL, ?, ?, ?, ?)
                     """,
                     (
                         thread_id,
@@ -962,6 +979,8 @@ class BridgeStore:
                         approved_int,
                         clean_caller_conv,
                         notify_int,
+                        valid_batch_id,
+                        valid_callback_mode,
                         now_iso,
                         now_iso,
                     ),
@@ -984,6 +1003,8 @@ class BridgeStore:
             "to_workspace": recipient["slug"],
             "msg_type": valid_type,
             "workflow_profile": valid_workflow,
+            "batch_id": valid_batch_id,
+            "callback_mode": valid_callback_mode,
             "subject": valid_subject,
             "status": "open",
             "approved": bool(approved_int),
@@ -1054,6 +1075,8 @@ class BridgeStore:
                     t.status,
                     t.approved,
                     t.target_conversation_id,
+                    t.batch_id,
+                    t.callback_mode,
                     t.created_at,
                     t.updated_at,
                     (
@@ -1103,6 +1126,8 @@ class BridgeStore:
                 "status": row["status"],
                 "approved": bool(row["approved"]),
                 "target_conversation_id": row["target_conversation_id"],
+                "batch_id": row["batch_id"],
+                "callback_mode": row["callback_mode"],
                 "unread_count": int(row["unread_count"]),
                 "message_count": int(row["message_count"]),
                 "latest_job_id": row["latest_job_id"],
@@ -1190,6 +1215,11 @@ class BridgeStore:
                 """,
                 (tid,),
             ).fetchone()
+            batch_summary = (
+                summarize_batch(conn, thread_row["batch_id"])
+                if thread_row["batch_id"]
+                else None
+            )
 
         messages: List[Dict[str, Any]] = []
         all_file_refs: List[str] = []
@@ -1217,7 +1247,7 @@ class BridgeStore:
             thread_row, now=now, pid_checker=pid_checker
         )
 
-        return {
+        result: Dict[str, Any] = {
             "thread_id": thread_row["id"],
             "from_workspace": thread_row["from_workspace"],
             "to_workspace": thread_row["to_workspace"],
@@ -1226,6 +1256,8 @@ class BridgeStore:
             "target_sidecar_status": target_sidecar_status,
             "msg_type": thread_row["msg_type"],
             "workflow_profile": thread_row["workflow_profile"],
+            "batch_id": thread_row["batch_id"],
+            "callback_mode": thread_row["callback_mode"],
             "subject": thread_row["subject"],
             "status": thread_row["status"],
             "approved": bool(thread_row["approved"]),
@@ -1240,6 +1272,9 @@ class BridgeStore:
             "messages": messages,
             "latest_job": _row_to_job(job_row) if job_row is not None else None,
         }
+        if batch_summary is not None:
+            result["batch_summary"] = batch_summary
+        return result
 
     def get_message(self, message_id: int) -> Dict[str, Any]:
         """Retourne un message par son identifiant entier."""
@@ -1301,13 +1336,15 @@ class BridgeStore:
         completed_job_ids: List[str] = []
         callback_status: Optional[str] = None
         callback_job: Optional[Dict[str, Any]] = None
+        batch_status: Optional[str] = None
 
         with self._connect() as conn:
             with self._transaction(conn, immediate=True):
                 row = conn.execute(
                     """
                     SELECT id, from_workspace, to_workspace, approved, target_conversation_id,
-                           caller_conversation_id, notify_caller, callback_dispatched_at
+                           caller_conversation_id, notify_caller, callback_dispatched_at,
+                           batch_id, callback_mode
                     FROM threads WHERE id = ?
                     """,
                     (tid,),
@@ -1381,63 +1418,88 @@ class BridgeStore:
                     and effective_conv is not None
                     and str(caller_conv).casefold() == str(effective_conv).casefold()
                 )
-                should_notify = (
+                batch_eval = (
+                    evaluate_batch_callback(conn, row["batch_id"], tid, close)
+                    if is_target_reply
+                    else {
+                        "emit_callback": True,
+                        "mode": "per_thread",
+                        "fail_fast": False,
+                        "reason": "per_thread",
+                        "batch_status": None,
+                    }
+                )
+                if is_target_reply and batch_eval.get("batch_status") is not None:
+                    batch_status = batch_eval["batch_status"]
+
+                should_notify_eligible = (
                     is_target_reply
                     and bool(row["notify_caller"])
                     and bool(row["approved"])
                     and bool(caller_conv)
                     and not same_conv
-                    and row["callback_dispatched_at"] is None
                     and (close or bool(completed_job_ids))
                 )
-                if should_notify:
-                    pending_row = conn.execute(
-                        "SELECT 1 FROM jobs WHERE thread_id = ? AND status IN ('queued', 'claimed') LIMIT 1",
-                        (tid,),
-                    ).fetchone()
-                    if pending_row is None:
-                        from_ws_row = conn.execute(
-                            f"SELECT {_WORKSPACE_COLS} FROM workspaces WHERE slug = ?",
-                            (row["from_workspace"],),
+                if should_notify_eligible and (
+                    batch_eval["mode"] == "on_batch_complete" or row["callback_dispatched_at"] is None
+                ):
+                    if not batch_eval["emit_callback"]:
+                        callback_status = batch_eval["reason"]
+                    else:
+                        pending_row = conn.execute(
+                            "SELECT 1 FROM jobs WHERE thread_id = ? AND status IN ('queued', 'claimed') LIMIT 1",
+                            (tid,),
                         ).fetchone()
-                        caller_sidecar_status = (
-                            compute_sidecar_status(from_ws_row, now=now_dt, pid_checker=pid_checker)
-                            if from_ws_row is not None
-                            else "unlinked"
-                        )
-                        if caller_sidecar_status == "online":
-                            if close:
-                                conn.execute(
-                                    "UPDATE threads SET callback_dispatched_at = ? WHERE id = ?",
-                                    (now_iso, tid),
-                                )
-                            cb_job_id = self._next_unique_id(conn, "jobs", "job", now_dt)
-                            conn.execute(
-                                """
-                                INSERT INTO jobs (
-                                    id, thread_id, message_id, target_workspace, action, direction, model,
-                                    sidecar_id, target_conversation_id, status, exit_code,
-                                    error_summary, claimed_at, dispatched_at, finished_at, created_at
-                                )
-                                VALUES (?, ?, ?, ?, 'send_message', 'callback', NULL, ?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, ?)
-                                """,
-                                (
-                                    cb_job_id,
-                                    tid,
-                                    message_id,
-                                    row["from_workspace"],
-                                    from_ws_row["sidecar_id"],
-                                    caller_conv,
-                                    now_iso,
-                                ),
-                            )
-                            cb_row = conn.execute(
-                                "SELECT * FROM jobs WHERE id = ?", (cb_job_id,)
+                        if pending_row is None:
+                            from_ws_row = conn.execute(
+                                f"SELECT {_WORKSPACE_COLS} FROM workspaces WHERE slug = ?",
+                                (row["from_workspace"],),
                             ).fetchone()
-                            callback_job = _row_to_job(cb_row)
-                            callback_status = "queued"
-                        else:
-                            callback_status = f"skipped_sidecar_{caller_sidecar_status}"
+                            caller_sidecar_status = (
+                                compute_sidecar_status(from_ws_row, now=now_dt, pid_checker=pid_checker)
+                                if from_ws_row is not None
+                                else "unlinked"
+                            )
+                            if caller_sidecar_status == "online":
+                                if close:
+                                    if batch_eval["mode"] == "on_batch_complete" and row["batch_id"]:
+                                        conn.execute(
+                                            "UPDATE threads SET callback_dispatched_at = ? "
+                                            "WHERE batch_id = ? AND callback_dispatched_at IS NULL",
+                                            (now_iso, row["batch_id"]),
+                                        )
+                                    else:
+                                        conn.execute(
+                                            "UPDATE threads SET callback_dispatched_at = ? WHERE id = ?",
+                                            (now_iso, tid),
+                                        )
+                                cb_job_id = self._next_unique_id(conn, "jobs", "job", now_dt)
+                                conn.execute(
+                                    """
+                                    INSERT INTO jobs (
+                                        id, thread_id, message_id, target_workspace, action, direction, model,
+                                        sidecar_id, target_conversation_id, status, exit_code,
+                                        error_summary, claimed_at, dispatched_at, finished_at, created_at
+                                    )
+                                    VALUES (?, ?, ?, ?, 'send_message', 'callback', NULL, ?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, ?)
+                                    """,
+                                    (
+                                        cb_job_id,
+                                        tid,
+                                        message_id,
+                                        row["from_workspace"],
+                                        from_ws_row["sidecar_id"],
+                                        caller_conv,
+                                        now_iso,
+                                    ),
+                                )
+                                cb_row = conn.execute(
+                                    "SELECT * FROM jobs WHERE id = ?", (cb_job_id,)
+                                ).fetchone()
+                                callback_job = _row_to_job(cb_row)
+                                callback_status = "queued"
+                            else:
+                                callback_status = f"skipped_sidecar_{caller_sidecar_status}"
 
         result: Dict[str, Any] = {
             "thread_id": tid,
@@ -1453,6 +1515,8 @@ class BridgeStore:
             result["callback_status"] = callback_status
         if callback_job is not None:
             result["callback_job"] = callback_job
+        if batch_status is not None:
+            result["batch_status"] = batch_status
         return result
 
     def create_job(
@@ -1636,9 +1700,25 @@ class BridgeStore:
             with self._transaction(conn, immediate=True):
                 row = conn.execute(
                     """
-                    SELECT id FROM jobs
-                    WHERE target_workspace = ? AND status = 'queued'
-                    ORDER BY created_at ASC, rowid ASC
+                    SELECT j.id
+                    FROM jobs j
+                    JOIN threads t ON t.id = j.thread_id
+                    WHERE j.target_workspace = ?
+                      AND j.status = 'queued'
+                      AND (
+                          j.direction = 'callback'
+                          OR t.msg_type != 'handoff'
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM jobs j2
+                              JOIN threads t2 ON t2.id = j2.thread_id
+                              WHERE j2.target_workspace = j.target_workspace
+                                AND j2.direction = 'outbound'
+                                AND t2.msg_type = 'handoff'
+                                AND j2.status IN ('claimed', 'dispatched')
+                          )
+                      )
+                    ORDER BY j.created_at ASC, j.rowid ASC
                     LIMIT 1
                     """,
                     (ws["slug"],),
@@ -1774,24 +1854,66 @@ class BridgeStore:
                 updated = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return _row_to_job(updated)
 
-    def cancel_job(self, job_id: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
-        """Annule un job en attente (queued/claimed) ou déjà envoyé (dispatched)."""
-        if not isinstance(job_id, str) or not job_id.strip():
-            raise ValidationError("job_id est requis.")
-        jid = job_id.strip()
+    def cancel_job(
+        self,
+        job_id: Optional[str] = None,
+        *,
+        thread_id: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Annule un job par job_id ou le plus récent job actif d'un thread_id."""
+        if job_id is not None and not isinstance(job_id, str):
+            raise ValidationError("job_id doit être une chaîne de caractères.")
+        if thread_id is not None and not isinstance(thread_id, str):
+            raise ValidationError("thread_id doit être une chaîne de caractères.")
+        jid = job_id.strip() if isinstance(job_id, str) and job_id.strip() else None
+        tid = thread_id.strip() if isinstance(thread_id, str) and thread_id.strip() else None
+        if jid is None and tid is None:
+            raise ValidationError("job_id ou thread_id est requis.")
+
         self.reconcile_orphan_jobs(now=now)
         now_iso = utc_now_iso(now)
 
         with self._connect() as conn:
             with self._transaction(conn, immediate=True):
-                row = conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
-                if row is None:
-                    raise NotFoundError(f"Job introuvable : {jid!r}.")
+                if jid is not None:
+                    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
+                    if row is None:
+                        raise NotFoundError(f"Job introuvable : {jid!r}.")
+                else:
+                    t_exists = conn.execute(
+                        "SELECT 1 FROM threads WHERE id = ?", (tid,)
+                    ).fetchone()
+                    if t_exists is None:
+                        raise NotFoundError(f"Fil introuvable : {tid!r}.")
+                    row = conn.execute(
+                        """
+                        SELECT * FROM jobs
+                        WHERE thread_id = ? AND status IN ('queued', 'claimed', 'dispatched')
+                        ORDER BY created_at DESC, rowid DESC
+                        LIMIT 1
+                        """,
+                        (tid,),
+                    ).fetchone()
+                    if row is None:
+                        row = conn.execute(
+                            """
+                            SELECT * FROM jobs
+                            WHERE thread_id = ?
+                            ORDER BY created_at DESC, rowid DESC
+                            LIMIT 1
+                            """,
+                            (tid,),
+                        ).fetchone()
+                    if row is None:
+                        raise NotFoundError(f"Aucun job trouvé pour le fil {tid!r}.")
+
                 if row["status"] not in _ACTIVE_JOB_STATUSES:
                     res = _row_to_job(row)
                     res["cancelled"] = False
                     return res
 
+                target_job_id = str(row["id"])
                 conn.execute(
                     """
                     UPDATE jobs
@@ -1800,9 +1922,11 @@ class BridgeStore:
                         finished_at = ?
                     WHERE id = ?
                     """,
-                    (now_iso, jid),
+                    (now_iso, target_job_id),
                 )
-                updated = conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
+                updated = conn.execute(
+                    "SELECT * FROM jobs WHERE id = ?", (target_job_id,)
+                ).fetchone()
         res = _row_to_job(updated)
         res["cancelled"] = True
         return res
@@ -1883,8 +2007,9 @@ class BridgeStore:
         self,
         now: Optional[datetime] = None,
         pid_checker: Optional[Callable[[int], bool]] = None,
+        dispatched_stale_seconds: Optional[int] = None,
     ) -> List[str]:
-        """Passe en failed les jobs queued/claimed bloqués ou dont le sidecar est mort."""
+        """Passe en failed les jobs queued/claimed bloqués/morts et les jobs dispatched expirés."""
         check_pid = pid_checker or is_pid_alive
         ref_now = now or datetime.now(timezone.utc)
         if ref_now.tzinfo is None:
@@ -1902,9 +2027,11 @@ class BridgeStore:
                 WHERE j.status IN ('queued', 'claimed')
                 """
             ).fetchall()
-
-        if not candidates:
-            return []
+            stale_dispatched_ids = find_stale_dispatched_jobs(
+                conn,
+                ref_now,
+                stale_seconds=dispatched_stale_seconds,
+            )
 
         to_fail: List[str] = []
         for row in candidates:
@@ -1922,7 +2049,7 @@ class BridgeStore:
             if is_orphan:
                 to_fail.append(jid)
 
-        if not to_fail:
+        if not to_fail and not stale_dispatched_ids:
             return []
 
         reconciled_ids: List[str] = []
@@ -1938,6 +2065,19 @@ class BridgeStore:
                         WHERE id = ? AND status IN ('queued', 'claimed')
                         """,
                         (ORPHAN_ERROR_SUMMARY, ref_now_iso, jid),
+                    )
+                    if cur.rowcount > 0:
+                        reconciled_ids.append(jid)
+                for jid in stale_dispatched_ids:
+                    cur = conn.execute(
+                        """
+                        UPDATE jobs
+                        SET status = 'failed',
+                            error_summary = ?,
+                            finished_at = ?
+                        WHERE id = ? AND status = 'dispatched'
+                        """,
+                        (STALE_DISPATCHED_ERROR_SUMMARY, ref_now_iso, jid),
                     )
                     if cur.rowcount > 0:
                         reconciled_ids.append(jid)

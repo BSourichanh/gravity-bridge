@@ -16,6 +16,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
+from core.batches import STALE_DISPATCHED_ERROR_SUMMARY  # noqa: E402
 from core.security import (  # noqa: E402
     DispatchBlockedError,
     NotFoundError,
@@ -76,6 +77,7 @@ class TestSchemaMigrationAndWorkspaces(StoreTestCase):
             {
                 "idx_threads_to_status",
                 "idx_threads_from_status",
+                "idx_threads_batch_id",
                 "idx_messages_thread",
                 "idx_jobs_target_status",
                 "idx_jobs_thread_status",
@@ -1019,6 +1021,259 @@ class TestJobsAndReconciliation(StoreTestCase):
                 now=now,
             )
         self.assertEqual(self.store.list_jobs(thread_id=t_question["thread_id"], reconcile=False), [])
+
+    def test_batch_threads_aggregation_fail_fast_and_already_dispatched(self) -> None:
+        now = datetime.now(timezone.utc)
+        caller_conv = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+        self.store.record_sidecar_heartbeat(
+            "architect", sidecar_id="gravity-bridge-architect", pid=os.getpid(), now=now
+        )
+        self.store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid(), now=now
+        )
+
+        # Validation : on_batch_complete sans batch_id refusé.
+        with self.assertRaises(ValidationError):
+            self.store.create_thread(
+                "architect",
+                "metrics",
+                "handoff",
+                "Sans lot",
+                "Body",
+                callback_mode="on_batch_complete",
+                now=now,
+            )
+
+        t1 = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Lot W2 - 1",
+            "Body 1",
+            file_refs=["a.py"],
+            approved=True,
+            caller_conversation_id=caller_conv,
+            batch_id="batch-w2-01",
+            callback_mode="on_batch_complete",
+            now=now,
+        )
+        t2 = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Lot W2 - 2",
+            "Body 2",
+            file_refs=["b.py"],
+            approved=True,
+            caller_conversation_id=caller_conv,
+            batch_id="batch-w2-01",
+            callback_mode="on_batch_complete",
+            now=now,
+        )
+        self.assertEqual(t1["batch_id"], "batch-w2-01")
+        self.assertEqual(t1["callback_mode"], "on_batch_complete")
+
+        inbox = self.store.list_inbox("metrics", direction="inbox", status="open")
+        self.assertEqual({item["batch_id"] for item in inbox}, {"batch-w2-01"})
+        self.assertEqual({item["callback_mode"] for item in inbox}, {"on_batch_complete"})
+
+        detail_1 = self.store.read_thread(t1["thread_id"], reconcile=False)
+        self.assertEqual(detail_1["batch_id"], "batch-w2-01")
+        self.assertEqual(detail_1["callback_mode"], "on_batch_complete")
+        self.assertEqual(detail_1["batch_summary"]["total"], 2)
+        self.assertFalse(detail_1["batch_summary"]["all_done"])
+
+        # Clôture de t1 -> waiting_batch, pas de callback_job.
+        r1 = self.store.add_reply(
+            t1["thread_id"], "metrics", "T1 OK", file_refs=["c.py"], close=True, now=now
+        )
+        self.assertEqual(r1["callback_status"], "waiting_batch")
+        self.assertEqual(r1["batch_status"], "waiting_batch")
+        self.assertNotIn("callback_job", r1)
+
+        # Clôture de t2 -> batch_complete, callback_job créé + callback_dispatched_at posé sur le lot.
+        r2 = self.store.add_reply(
+            t2["thread_id"], "metrics", "T2 OK", close=True, now=now
+        )
+        self.assertEqual(r2["callback_status"], "queued")
+        self.assertEqual(r2["batch_status"], "batch_complete")
+        self.assertIn("callback_job", r2)
+        self.assertIsNotNone(
+            self.store.read_thread(t1["thread_id"], reconcile=False)["callback_dispatched_at"]
+        )
+        self.assertIsNotNone(
+            self.store.read_thread(t2["thread_id"], reconcile=False)["callback_dispatched_at"]
+        )
+
+        # Rejeu sur t1 -> already_dispatched.
+        r_replay = self.store.add_reply(
+            t1["thread_id"], "metrics", "Rejeu tardif", close=True, now=now
+        )
+        self.assertEqual(r_replay["callback_status"], "already_dispatched")
+        self.assertEqual(r_replay["batch_status"], "batch_complete")
+        self.assertNotIn("callback_job", r_replay)
+
+        # Fail-fast sur nouveau lot avec close=False après job outbound dispatched.
+        t_ff = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Lot FF",
+            "Body FF",
+            approved=True,
+            caller_conversation_id=caller_conv,
+            batch_id="batch-w2-ff",
+            callback_mode="on_batch_complete",
+            now=now,
+        )
+        j_ff = self.store.create_job(t_ff["thread_id"], t_ff["message_id"], "metrics", now=now)
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.store.mark_job_dispatched(
+            j_ff["id"], target_conversation_id="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", now=now
+        )
+        r_ff = self.store.add_reply(
+            t_ff["thread_id"],
+            "metrics",
+            "Blocage critique",
+            close=False,
+            conversation_id="bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+            now=now,
+        )
+        self.assertEqual(r_ff["callback_status"], "queued")
+        self.assertEqual(r_ff["batch_status"], "fail_fast")
+        self.assertIn("callback_job", r_ff)
+
+    def test_claim_next_job_serializes_outbound_handoffs_and_never_blocks_callback_or_question(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid(), now=now
+        )
+        self.store.record_sidecar_heartbeat(
+            "architect", sidecar_id="gravity-bridge-architect", pid=os.getpid(), now=now
+        )
+
+        h1 = self.store.create_thread("architect", "metrics", "handoff", "H1", "B1", approved=True, now=now)
+        h2 = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "H2",
+            "B2",
+            approved=True,
+            now=now + timedelta(seconds=1),
+        )
+        q1 = self.store.create_thread(
+            "architect",
+            "metrics",
+            "question",
+            "Q1",
+            "BQ",
+            approved=True,
+            now=now + timedelta(seconds=2),
+        )
+
+        jh1 = self.store.create_job(h1["thread_id"], h1["message_id"], "metrics", now=now)
+        jh2 = self.store.create_job(
+            h2["thread_id"], h2["message_id"], "metrics", now=now + timedelta(seconds=1)
+        )
+        jq1 = self.store.create_job(
+            q1["thread_id"], q1["message_id"], "metrics", now=now + timedelta(seconds=2)
+        )
+
+        # Claim H1 -> passe à claimed.
+        c1 = self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.assertIsNotNone(c1)
+        assert c1 is not None
+        self.assertEqual(c1["id"], jh1["id"])
+
+        # H2 (handoff outbound) est bloqué pendant que H1 est claimed, mais Q1 (question) est claimable !
+        c2 = self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.assertIsNotNone(c2)
+        assert c2 is not None
+        self.assertEqual(c2["id"], jq1["id"])
+
+        # Plus rien de claimable tant que H1 est claimed puis dispatched.
+        self.assertIsNone(
+            self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        )
+        self.store.mark_job_dispatched(jh1["id"], target_conversation_id="conv-h1", now=now)
+        self.assertIsNone(
+            self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        )
+
+        # Un callback sur le même target_workspace ('metrics') n'est jamais bloqué par un handoff actif.
+        t_cb = self.store.create_thread(
+            "metrics",
+            "architect",
+            "handoff",
+            "CB",
+            "Body",
+            approved=True,
+            caller_conversation_id="cccccccc-3333-4333-8333-cccccccccccc",
+            now=now,
+        )
+        rep_cb = self.store.add_reply(
+            t_cb["thread_id"],
+            "architect",
+            "Réponse CB",
+            close=True,
+            conversation_id="dddddddd-4444-4444-8444-dddddddddddd",
+            now=now + timedelta(seconds=3),
+        )
+        cb_id = rep_cb["callback_job"]["id"]
+        c_cb = self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.assertIsNotNone(c_cb)
+        assert c_cb is not None
+        self.assertEqual(c_cb["id"], cb_id)
+
+        # Une fois H1 complété, H2 devient claimable.
+        self.store.complete_job(jh1["id"], status="completed", exit_code=0, now=now)
+        c3 = self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.assertIsNotNone(c3)
+        assert c3 is not None
+        self.assertEqual(c3["id"], jh2["id"])
+
+    def test_reconcile_dispatched_stale_ttl_and_cancel_job_by_thread_id(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid(), now=now
+        )
+        t1 = self.store.create_thread("architect", "metrics", "handoff", "Stale H1", "B1", approved=True, now=now)
+        t2 = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Queued H2",
+            "B2",
+            approved=True,
+            now=now + timedelta(seconds=1),
+        )
+        j1 = self.store.create_job(t1["thread_id"], t1["message_id"], "metrics", now=now)
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.store.mark_job_dispatched(j1["id"], target_conversation_id="conv-stale", now=now)
+
+        # Dépassement TTL stale (1801s > 1800s par défaut) -> failed + débloque H2.
+        later = now + timedelta(seconds=1801)
+        reconciled = self.store.reconcile_orphan_jobs(now=later)
+        self.assertEqual(reconciled, [j1["id"]])
+        j1_after = self.store.get_job(j1["id"], reconcile=False)
+        self.assertEqual(j1_after["status"], "failed")
+        self.assertEqual(j1_after["error_summary"], STALE_DISPATCHED_ERROR_SUMMARY)
+
+        self.store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid(), now=later
+        )
+        j2 = self.store.create_job(t2["thread_id"], t2["message_id"], "metrics", now=later)
+        cancelled = self.store.cancel_job(thread_id=t2["thread_id"], now=later)
+        self.assertTrue(cancelled["cancelled"])
+        self.assertEqual(cancelled["id"], j2["id"])
+        self.assertEqual(cancelled["status"], "cancelled")
+
+        not_cancelled = self.store.cancel_job(thread_id=t2["thread_id"], now=later)
+        self.assertFalse(not_cancelled["cancelled"])
+
+        with self.assertRaises(NotFoundError):
+            self.store.cancel_job(thread_id="thr-missing")
 
 
 class TestMultiProcessWalConcurrency(StoreTestCase):

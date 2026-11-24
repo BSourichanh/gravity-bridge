@@ -6,6 +6,12 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 ## [Unreleased]
 
 ### Added
+- **Lot W2 — Orchestration de lots (`batch_id`, `callback_mode`), sérialisation `handoff` et TTL `dispatched` (`core/batches.py`, `core/store.py`, `mcp/server.py`, `scripts/sidecar_relay.py`) :**
+  - Nouveau module SRP `plugin/core/batches.py` (100 % stdlib) : validation `batch_id` / `callback_mode` (`per_thread` | `on_batch_complete`), `resolve_dispatched_stale_seconds` (`GRAVITY_BRIDGE_DISPATCHED_STALE_SECONDS`, défaut `1800` s), `has_active_outbound_job`, `find_stale_dispatched_jobs`, `summarize_batch` et `evaluate_batch_callback`.
+  - Extension idempotente du schéma `threads` (`batch_id`, `callback_mode`, `idx_threads_batch_id`), exposition dans `create_thread`, `list_inbox`, `read_thread` (`batch_summary`), agrégation / fail-fast / anti-rejeu dans `add_reply`, sérialisation des jobs `handoff` outbound par `target_workspace` dans `claim_next_job` sans bloquer `callback` ni `question`/`info`, réconciliation TTL `dispatched` dans `reconcile_orphan_jobs` et `cancel_job(..., thread_id=...)`.
+  - Exposition MCP de `batch_id` / `callback_mode` sur `send_message` et `thread_id` sur `manage_thread(action="cancel_job")` ; réconciliation préalable dans `process_one_job` et prompts callback consolidés / fail-fast / poursuite autonome Vague W+1 à `depth=0` dans `build_callback_prompt()`.
+- **Durcissement validateur `INT-01/03/06` (`plugin/scripts/validate.py`) :**
+  - Ajout de `"batches"` dans `ALLOWED_LOCAL_MODULES`, enum `ALLOWED_UI_MODES` sur `config/module.json`, contrôle exhaustif BOM UTF-8 / fins de ligne LF sur tous les `.py`/`.md`/`.json` sous `plugin/` et validation `suggestedPrompts` (`<= 100` car. et format `/cmd — résumé` ou `/cmd - résumé`).
 - **Lot W1 — Profil `workflow` / `workflow_profile` pour orchestration autonome (`core/security.py`, `core/store.py`, `mcp/server.py`, `scripts/sidecar_relay.py`) :**
   - Ajout de `ALLOWED_WORKFLOW_PROFILES = ("none", "quick", "standard", "deep", "evo")` et `validate_workflow_profile(workflow, msg_type=...)` (défaut `"standard"` sur `handoff`, `"none"` par défaut et seul autorisé sur `question`/`info`).
   - Ajout et migration idempotente de `threads.workflow_profile` dans `bridge.db`, prise en charge dans `create_thread`, `read_thread` et `create_job` (`workflow` optionnel sur `send_message` et `dispatch_thread`).

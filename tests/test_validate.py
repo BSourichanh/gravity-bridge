@@ -259,6 +259,54 @@ class ValidateTestCase(unittest.TestCase):
         self.assertIn("AGENTS.md racine doit utiliser des fins de ligne LF", joined_repo)
         self.assertIn("2500 octets", joined_repo)
 
+    def test_int01_ui_mode_int03_exhaustive_bom_lf_and_int06_suggested_prompts(self) -> None:
+        # INT-01 : ui.mode hors enum rejeté.
+        copy_ui = self._copy_plugin("bad-ui-mode")
+        mod_path = copy_ui / "config" / "module.json"
+        mod_data = json.loads(mod_path.read_text(encoding="utf-8"))
+        mod_data["ui"]["mode"] = "legacy-unsupported"
+        mod_path.write_text(
+            json.dumps(mod_data, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        rep_ui = validate_mod.Report()
+        validate_mod.validate_plugin(copy_ui, rep_ui)
+        self.assertTrue(any("ui.mode" in e and "invalide" in e for e in rep_ui.errors), rep_ui.errors)
+
+        # INT-03 : BOM ou CRLF dans n'importe quel .py/.md/.json sous root -> erreur.
+        copy_crlf = self._copy_plugin("bad-crlf-py-md")
+        batches_py = copy_crlf / "core" / "batches.py"
+        batches_py.write_bytes(batches_py.read_bytes().replace(b"\n", b"\r\n"))
+        examples_md = copy_crlf / "skills" / "gravity-bridge" / "references" / "examples.md"
+        examples_md.write_bytes(b"\xef\xbb\xbf" + examples_md.read_bytes())
+        rep_crlf = validate_mod.Report()
+        validate_mod.validate_plugin(copy_crlf, rep_crlf)
+        joined_crlf = "\n".join(rep_crlf.errors)
+        self.assertIn("core/batches.py doit utiliser des fins de ligne LF", joined_crlf)
+        self.assertIn("examples.md ne doit pas contenir de BOM UTF-8", joined_crlf)
+
+        # INT-06 : suggestedPrompts > 100 car. ou format hors '/cmd — résumé' rejetés.
+        copy_prompts = self._copy_plugin("bad-prompts")
+        m_path = copy_prompts / "plugin.json"
+        m_data = json.loads(m_path.read_text(encoding="utf-8"))
+        m_data["suggestedPrompts"] = [
+            "/gravity-bridge workspaces — " + ("x" * 90),
+            "Prompt sans slash ni commande",
+            "/gravity-bridge status - Résumé valide avec tiret simple",
+        ]
+        m_path.write_text(
+            json.dumps(m_data, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        rep_prompts = validate_mod.Report()
+        validate_mod.validate_plugin(copy_prompts, rep_prompts)
+        joined_prompts = "\n".join(rep_prompts.errors)
+        self.assertIn("suggestedPrompts[0] dépasse 100 caractères", joined_prompts)
+        self.assertIn("suggestedPrompts[1] doit respecter", joined_prompts)
+        self.assertNotIn("suggestedPrompts[2]", joined_prompts)
+
 
 if __name__ == "__main__":
     unittest.main()

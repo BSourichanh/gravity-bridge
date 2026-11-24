@@ -71,3 +71,31 @@ Pour lier un projet cible et réparer tout projet utilisateur pollué par `"side
 }
 ```
 Génère `~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`, crée/met à jour `<nom> (Bridge)` dans `~/.gemini/config/projects/*.json` et active le sidecar dans `~/.gemini/config/config.json` (`"schemaVersion": 1`).
+
+## 4. Orchestration par lots (`batch_id`, `callback_mode`, `cancel_job`)
+
+Pour grouper plusieurs `send_message` dans un lot avec callback retour unique à la fin (`on_batch_complete`) :
+
+```json
+{
+  "from_workspace": "gravity-architect",
+  "to_workspace": "gravity-metrics",
+  "msg_type": "handoff",
+  "workflow": "standard",
+  "batch_id": "wave-2-core",
+  "callback_mode": "on_batch_complete",
+  "subject": "Lot W2 — Metrics",
+  "body": "Implémenter la tâche T1...",
+  "approved": true,
+  "dispatch": true,
+  "caller_conversation_id": "<UUID conversation appelante>"
+}
+```
+
+- `callback_mode` : `"per_thread"` (défaut) ou `"on_batch_complete"` (exige `batch_id`).
+- Sur `on_batch_complete` :
+  - Tant que d'autres fils du lot restent `open`, `reply_thread(..., close=true)` retourne `callback_status="waiting_batch"` sans callback anticipé.
+  - Dès que le dernier fil clôture, `callback_status="queued"` (`batch_status="batch_complete"`) pose `callback_dispatched_at` sur le lot et injecte `batch_summary` dans le prompt callback (`depth=0` autorise la poursuite autonome sur la vague suivante d'un plan pré-approuvé ; `depth >= 1` reste verrouillé).
+  - Si un fil répond avec `close=false` après un job outbound actif : `batch_status="fail_fast"` déclenche immédiatement le callback d'arrêt.
+- Sérialisation & TTL : sur un même `target_workspace`, les jobs `handoff` `outbound` s'exécutent un par un sans jamais bloquer les `callback` ni `question`/`info` ; un job `dispatched` dépassant `GRAVITY_BRIDGE_DISPATCHED_STALE_SECONDS` (défaut `1800` s) passe à `failed`.
+- Annulation ciblée par fil : `manage_thread(action="cancel_job", thread_id="thr-...")`.

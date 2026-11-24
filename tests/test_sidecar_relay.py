@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone  # noqa: E402
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugin"
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from core.store import BridgeStore  # noqa: E402
+from core.batches import DISPATCHED_STALE_ENV, STALE_DISPATCHED_ERROR_SUMMARY  # noqa: E402
+from core.store import BridgeStore, utc_now_iso  # noqa: E402
 from scripts.sidecar_relay import (  # noqa: E402
     build_agentapi_command,
     build_callback_prompt,
@@ -491,6 +494,95 @@ class SidecarRelayTestCase(unittest.TestCase):
         cb_prompt = build_callback_prompt({**handoff_thread, "status": "done"}, base_msg)
         self.assertNotIn("/gravity-workflow", cb_prompt)
         self.assertNotIn("caveman ultra", cb_prompt)
+
+    def test_build_callback_prompt_batch_fail_fast_depth0_and_depth1(self) -> None:
+        msg = {"id": 99, "body": "Rapport lot.", "file_refs": ["plugin/core/batches.py"]}
+        batch_thread = {
+            "thread_id": "thr-20261124-batch1",
+            "msg_type": "handoff",
+            "from_workspace": "architect",
+            "to_workspace": "metrics",
+            "subject": "Lot W2",
+            "batch_id": "wave-2-core",
+            "batch_summary": {
+                "total": 2,
+                "done_threads": 2,
+                "open_threads": 0,
+                "consolidated_file_refs": ["plugin/core/batches.py", "tests/test_batches.py"],
+                "threads": [
+                    {
+                        "thread_id": "thr-1",
+                        "to_workspace": "metrics",
+                        "status": "done",
+                        "latest_job_status": "completed",
+                        "subject": "T1",
+                        "last_reply_excerpt": "T1 OK",
+                    },
+                    {
+                        "thread_id": "thr-2",
+                        "to_workspace": "bridge",
+                        "status": "done",
+                        "latest_job_status": "completed",
+                        "subject": "T2",
+                        "last_reply_excerpt": "T2 OK",
+                    },
+                ],
+            },
+        }
+
+        # Fail-fast (status='open') -> arrêt immédiat.
+        p_ff = build_callback_prompt({**batch_thread, "status": "open"}, msg, depth=0)
+        self.assertIn("wave-2-core", p_ff)
+        self.assertIn("FAIL-FAST LOT", p_ff)
+        self.assertIn("arrêt immédiat", p_ff)
+
+        # Clôture lot à depth=0 -> résultat consolidé + poursuite autonome Vague W+1.
+        p_d0 = build_callback_prompt({**batch_thread, "status": "done"}, msg, depth=0)
+        self.assertIn("Lot (batch_id=wave-2-core) : 2/2", p_d0)
+        self.assertIn("tests/test_batches.py", p_d0)
+        self.assertIn("Vague W+1", p_d0)
+        self.assertIn("sans redemander confirmation", p_d0)
+
+        # Clôture lot à depth=1 -> verrou strict maintenu.
+        p_d1 = build_callback_prompt({**batch_thread, "status": "done"}, msg, depth=1)
+        self.assertIn("verrou strict depth >= 1", p_d1)
+        self.assertIn("0 sous-dispatch autorisé", p_d1)
+        self.assertNotIn("Vague W+1", p_d1)
+
+    def test_process_one_job_reconciles_stale_dispatched_before_claim(self) -> None:
+        self._write_scenario({})
+        now = datetime.now(timezone.utc)
+        t1 = self.store.create_thread("architect", "metrics", "handoff", "H1", "B1", approved=True, now=now)
+        t2 = self.store.create_thread("architect", "metrics", "handoff", "H2", "B2", approved=True, now=now)
+        j1 = self.store.create_job(t1["thread_id"], t1["message_id"], "metrics", now=now)
+        self.store.claim_next_job("metrics", sidecar_id="gravity-bridge-metrics", now=now)
+        self.store.mark_job_dispatched(j1["id"], target_conversation_id="conv-stale", now=now)
+
+        # Vieillit j1 de 10s, puis exécute process_one_job avec TTL=5s.
+        old_iso = utc_now_iso(now - timedelta(seconds=10))
+        with self.store._connect() as conn:
+            with self.store._transaction(conn, immediate=True):
+                conn.execute(
+                    "UPDATE jobs SET dispatched_at = ?, created_at = ? WHERE id = ?",
+                    (old_iso, old_iso, j1["id"]),
+                )
+
+        j2 = self.store.create_job(t2["thread_id"], t2["message_id"], "metrics", now=now)
+        with mock.patch.dict(os.environ, {DISPATCHED_STALE_ENV: "5"}):
+            processed = process_one_job(
+                self.store,
+                "metrics",
+                sidecar_id="gravity-bridge-metrics",
+                agentapi_bin=str(self.fake_agentapi),
+                env=self._env(),
+            )
+        self.assertIsNotNone(processed)
+        assert processed is not None
+        self.assertEqual(processed["id"], j2["id"])
+        self.assertEqual(processed["status"], "dispatched")
+        j1_after = self.store.get_job(j1["id"], reconcile=False)
+        self.assertEqual(j1_after["status"], "failed")
+        self.assertEqual(j1_after["error_summary"], STALE_DISPATCHED_ERROR_SUMMARY)
 
 
 if __name__ == "__main__":

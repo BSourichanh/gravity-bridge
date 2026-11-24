@@ -13,6 +13,7 @@ PLUGIN_ROOT = MCP_DIR.parent
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
+from core.batches import validate_batch_id, validate_callback_mode  # noqa: E402
 from core.security import (  # noqa: E402
     NotFoundError,
     ValidationError,
@@ -249,6 +250,19 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                             "(omis = auto si caller_conversation_id fourni et sidecar appelant online)."
                         ),
                     },
+                    "batch_id": {
+                        "type": "string",
+                        "description": (
+                            "Identifiant optionnel de lot (<= 80 car., ^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$)."
+                        ),
+                    },
+                    "callback_mode": {
+                        "type": "string",
+                        "enum": ["per_thread", "on_batch_complete"],
+                        "description": (
+                            "Mode de callback retour (défaut 'per_thread' ; 'on_batch_complete' requiert batch_id)."
+                        ),
+                    },
                     "wait_seconds": {
                         "type": "integer",
                         "description": "Attente synchrone bornée en secondes (0..30, défaut 0).",
@@ -448,11 +462,15 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "thread_id": {
                         "type": "string",
-                        "description": "Identifiant du fil (requis pour close/reopen, optionnel pour get_job).",
+                        "description": (
+                            "Identifiant du fil (requis pour close/reopen, optionnel pour get_job et cancel_job)."
+                        ),
                     },
                     "job_id": {
                         "type": "string",
-                        "description": "Identifiant du job (requis pour cancel_job, optionnel pour get_job).",
+                        "description": (
+                            "Identifiant du job (requis pour cancel_job si thread_id omis, optionnel pour get_job)."
+                        ),
                     },
                     "older_than_days": {
                         "type": "integer",
@@ -520,6 +538,10 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         field_name="caller_conversation_id",
     )
     notify_caller = _optional_bool(args, "notify_caller")
+    batch_id = validate_batch_id(_optional_str(args, "batch_id"))
+    callback_mode = validate_callback_mode(
+        _optional_str(args, "callback_mode"), batch_id=batch_id
+    )
     wait_seconds = validate_wait_seconds(args.get("wait_seconds"))
 
     store = BridgeStore()
@@ -543,6 +565,8 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         caller_conversation_id=caller_conv_id,
         notify_caller=notify_caller,
         workflow=workflow,
+        batch_id=batch_id,
+        callback_mode=callback_mode,
     )
     if dispatch:
         job = store.create_job(
@@ -777,8 +801,13 @@ def _handle_manage_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         jobs = store.list_jobs(thread_id=thread_id, reconcile=True)
         return _tool_ok({"count": len(jobs), "jobs": jobs})
     if action == "cancel_job":
-        job_id = _require_str(args, "job_id").strip()
-        return _tool_ok(store.cancel_job(job_id))
+        job_id = _optional_str(args, "job_id")
+        thread_id = _optional_str(args, "thread_id")
+        if not job_id and not thread_id:
+            raise ValidationError(
+                "Le paramètre 'job_id' ou 'thread_id' est requis pour cancel_job."
+            )
+        return _tool_ok(store.cancel_job(job_id, thread_id=thread_id))
     if action == "prune_done":
         raw_days = args.get("older_than_days")
         days = validate_int_range(

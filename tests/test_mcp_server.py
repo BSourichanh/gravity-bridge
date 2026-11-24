@@ -942,6 +942,70 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         read_h = self._call_tool("read_thread", {"thread_id": tid_h})["structuredContent"]
         self.assertEqual(read_h["workflow_profile"], "evo")
 
+    def test_batch_send_read_and_cancel_job_by_thread_id(self) -> None:
+        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
+        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
+        store = BridgeStore(home=self.home_dir)
+        store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid()
+        )
+
+        bad_mode = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Batch sans ID",
+                "body": "Doit échouer.",
+                "callback_mode": "on_batch_complete",
+            },
+        )
+        self.assertTrue(bad_mode["isError"])
+        self.assertIn("batch_id", bad_mode["content"][0]["text"])
+
+        b1 = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Batch MCP 1",
+                "body": "Lot W2 tâche 1.",
+                "file_refs": ["plugin/core/batches.py"],
+                "approved": True,
+                "dispatch": True,
+                "batch_id": "mcp-wave-2",
+                "callback_mode": "on_batch_complete",
+            },
+        )
+        self.assertFalse(b1["isError"], b1)
+        sc1 = b1["structuredContent"]
+        self.assertEqual(sc1["batch_id"], "mcp-wave-2")
+        self.assertEqual(sc1["callback_mode"], "on_batch_complete")
+        tid1 = sc1["thread_id"]
+
+        read_res = self._call_tool("read_thread", {"thread_id": tid1})
+        self.assertFalse(read_res["isError"], read_res)
+        read_sc = read_res["structuredContent"]
+        self.assertEqual(read_sc["batch_id"], "mcp-wave-2")
+        self.assertEqual(read_sc["batch_summary"]["total"], 1)
+        self.assertEqual(
+            read_sc["batch_summary"]["consolidated_file_refs"], ["plugin/core/batches.py"]
+        )
+
+        # cancel_job par thread_id uniquement.
+        cancel_res = self._call_tool(
+            "manage_thread",
+            {"action": "cancel_job", "thread_id": tid1},
+        )
+        self.assertFalse(cancel_res["isError"], cancel_res)
+        self.assertTrue(cancel_res["structuredContent"]["cancelled"])
+        self.assertEqual(cancel_res["structuredContent"]["status"], "cancelled")
+
+        missing_params = self._call_tool("manage_thread", {"action": "cancel_job"})
+        self.assertTrue(missing_params["isError"])
+
 
 if __name__ == "__main__":
     unittest.main()

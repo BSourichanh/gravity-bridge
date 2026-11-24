@@ -24,6 +24,7 @@ from core.security import (  # noqa: E402
     AGENTAPI_TIMEOUT_SECONDS,
     MAX_LOG_BYTES,
     DispatchBlockedError,
+    get_bridge_depth,
     redact_secrets,
     truncate_utf8_bytes,
     validate_conversation_id,
@@ -233,9 +234,16 @@ def build_prompt(
 def build_callback_prompt(
     thread: Mapping[str, Any],
     message: Mapping[str, Any],
+    *,
+    depth: Optional[int] = None,
 ) -> str:
-    """Construit le prompt de callback retour vers caller_conversation_id (depth=1)."""
+    """Construit le prompt de callback retour vers caller_conversation_id."""
+    effective_depth = get_bridge_depth() if depth is None else int(depth)
     thread_status = str(thread.get("status") or "done")
+    batch_id = thread.get("batch_id")
+    batch_summary = thread.get("batch_summary")
+    has_batch = bool(batch_id and isinstance(batch_summary, Mapping))
+
     header = (
         f"[GRAVITY-BRIDGE | CALLBACK | thread={thread['thread_id']} "
         f"| from={thread['to_workspace']} | status={thread_status} | depth=1]"
@@ -247,7 +255,51 @@ def build_callback_prompt(
     file_refs = message.get("file_refs") or []
     if file_refs:
         lines.append(f"Références fichiers : {', '.join(str(r) for r in file_refs)}")
-    if thread_status == "open":
+
+    if has_batch:
+        total = int(batch_summary.get("total") or 0)
+        done_threads = int(batch_summary.get("done_threads") or 0)
+        open_threads = int(batch_summary.get("open_threads") or 0)
+        lines.extend(
+            [
+                "",
+                f"Lot (batch_id={batch_id}) : {done_threads}/{total} fil(s) terminé(s), {open_threads} ouvert(s)",
+            ]
+        )
+        consolidated_refs = batch_summary.get("consolidated_file_refs") or []
+        if consolidated_refs:
+            lines.append(
+                f"Références consolidées du lot : {', '.join(str(r) for r in consolidated_refs)}"
+            )
+        for item in batch_summary.get("threads") or []:
+            if not isinstance(item, Mapping):
+                continue
+            job_st = item.get("latest_job_status") or "n/a"
+            lines.append(
+                f"- {item.get('thread_id')} -> {item.get('to_workspace')} "
+                f"[{item.get('status')}] ({job_st}) : {item.get('subject')}"
+            )
+            excerpt = item.get("last_reply_excerpt")
+            if excerpt:
+                lines.append(f"  Extrait : {excerpt}")
+
+        if thread_status == "open":
+            status_note = (
+                "- FAIL-FAST LOT : arrêt immédiat (0 poursuite vers la vague suivante avant arbitrage humain). "
+                "Une relance éventuelle passe par reply_thread(..., dispatch=true)."
+            )
+        elif effective_depth == 0:
+            status_note = (
+                f"- Résultat consolidé du lot '{batch_id}' (tous les fils terminés) ; "
+                "poursuite autonome autorisée sur Vague W+1 si un plan pré-approuvé la contient "
+                "(sans redemander confirmation ; ne pas re-dispatcher ce lot clôturé)."
+            )
+        else:
+            status_note = (
+                f"- Résultat consolidé du lot '{batch_id}' ; verrou strict depth >= 1 maintenu : "
+                "0 sous-dispatch autorisé (ne pas re-dispatcher automatiquement)."
+            )
+    elif thread_status == "open":
         status_note = (
             f"- Réponse intermédiaire / question de '{thread['to_workspace']}' sur un fil toujours ouvert ; "
             "une relance éventuelle passe par reply_thread(..., dispatch=true) après arbitrage "
@@ -257,13 +309,14 @@ def build_callback_prompt(
         status_note = (
             f"- Fil clôturé par '{thread['to_workspace']}' ; ne pas re-dispatcher automatiquement (anti-boucle)."
         )
+
     lines.extend(
         [
             "",
             str(message.get("body") or "").rstrip(),
             "",
             "---",
-            "Rappel callback retour (depth=1) :",
+            f"Rappel callback retour (depth={effective_depth if has_batch else 1}) :",
             status_note,
             (
                 f"- Utiliser read_thread(thread_id=\"{thread['thread_id']}\", "
@@ -511,6 +564,7 @@ def process_one_job(
     timeout_seconds: float = AGENTAPI_TIMEOUT_SECONDS,
 ) -> Optional[Dict[str, Any]]:
     """Verrouille et traite le prochain job queued pour workspace_slug, ou None si vide."""
+    store.reconcile_orphan_jobs()
     job = store.claim_next_job(workspace_slug, sidecar_id=sidecar_id)
     if job is None:
         return None
@@ -542,7 +596,9 @@ def process_one_job(
                     error_summary=err_msg,
                 )
             effective_action = "send_message"
-            prompt_text = build_callback_prompt(thread, message)
+            prompt_text = build_callback_prompt(
+                thread, message, depth=get_bridge_depth(source_env)
+            )
         else:
             target_conv = job.get("target_conversation_id") or thread.get("target_conversation_id")
             effective_action = job["action"]

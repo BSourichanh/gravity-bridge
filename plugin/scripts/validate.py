@@ -44,6 +44,7 @@ MODULE_CONTRACT_FIELDS = {
 }
 ALLOWED_LOCAL_MODULES = {
     "core",
+    "batches",
     "security",
     "store",
     "sidecar_manager",
@@ -51,6 +52,18 @@ ALLOWED_LOCAL_MODULES = {
     "validate",
     "server",
 }
+ALLOWED_UI_MODES = frozenset(
+    {
+        "none",
+        "core",
+        "native-mcp-app",
+        "mcp-app",
+        "transition-mcp",
+        "transition-mcp-app",
+        "transition-sidecar",
+    }
+)
+SUGGESTED_PROMPT_RE = re.compile(r"^/\S+(?:\s+(?![—-]\s)\S+)*\s+[—-]\s+\S.*$")
 EXPECTED_MCP_TOOLS = {
     "register_workspace",
     "link_workspace",
@@ -155,6 +168,7 @@ def fix_python_cmd(plugin_root: Path) -> int:
         mcp_json.write_text(
             json.dumps(mdata, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         print(f"[FIXED] {mcp_json} -> '{py_cmd}'")
     else:
@@ -204,6 +218,8 @@ def _validate_manifest(root: Path, report: Report) -> None:
     raw_bytes = manifest_path.read_bytes()
     if raw_bytes.startswith(b"\xef\xbb\xbf"):
         report.error("plugin.json ne doit pas contenir de BOM UTF-8.")
+    if b"\r\n" in raw_bytes:
+        report.error("plugin.json doit utiliser des fins de ligne LF (CRLF détecté).")
 
     try:
         manifest = json.loads(raw_bytes.decode("utf-8-sig"))
@@ -256,6 +272,16 @@ def _validate_manifest(root: Path, report: Report) -> None:
         or not all(isinstance(p, str) and p.strip() for p in prompts)
     ):
         report.error("plugin.json : exactement 3 'suggestedPrompts' non vides sont requis.")
+    else:
+        for idx, prompt in enumerate(prompts):
+            if len(prompt) > 100:
+                report.error(
+                    f"plugin.json : suggestedPrompts[{idx}] dépasse 100 caractères ({len(prompt)})."
+                )
+            if not SUGGESTED_PROMPT_RE.match(prompt.strip()):
+                report.error(
+                    f"plugin.json : suggestedPrompts[{idx}] doit respecter '/cmd — résumé' (ou '/cmd - résumé')."
+                )
 
     logo_rel = str(manifest.get("logo") or "")
     logo_path = root / logo_rel
@@ -309,6 +335,8 @@ def _validate_module_contract(root: Path, report: Report) -> None:
     raw_bytes = module_path.read_bytes()
     if raw_bytes.startswith(b"\xef\xbb\xbf"):
         report.error("config/module.json ne doit pas contenir de BOM UTF-8.")
+    if b"\r\n" in raw_bytes:
+        report.error("config/module.json doit utiliser des fins de ligne LF (CRLF détecté).")
 
     try:
         mod = json.loads(raw_bytes.decode("utf-8-sig"))
@@ -367,8 +395,14 @@ def _validate_module_contract(root: Path, report: Report) -> None:
     if not isinstance(ui, dict):
         report.error("config/module.json : 'ui' doit être un objet JSON.")
     else:
-        if not _is_non_empty_str(ui.get("mode")):
+        ui_mode = ui.get("mode")
+        if not _is_non_empty_str(ui_mode):
             report.error("config/module.json : 'ui.mode' doit être une chaîne non vide.")
+        elif ui_mode not in ALLOWED_UI_MODES:
+            report.error(
+                f"config/module.json : 'ui.mode' invalide ({ui_mode!r}). "
+                f"Valeurs autorisées : {sorted(ALLOWED_UI_MODES)}."
+            )
         if not _is_non_empty_str(ui.get("target")):
             report.error("config/module.json : 'ui.target' doit être une chaîne non vide.")
 
@@ -641,10 +675,24 @@ def validate_plugin(root: Path, report: Report) -> None:
             continue
         _check_stdlib_only(py_file, report)
 
+    already_bom_lf_checked = {
+        root / "plugin.json",
+        root / "config" / "module.json",
+        root / "skills" / "gravity-bridge" / "SKILL.md",
+        root / "rules" / "AGENTS.md",
+    }
     for fpath in sorted(root.rglob("*")):
         if not fpath.is_file() or "__pycache__" in fpath.parts:
             continue
-        if fpath.suffix.lower() not in (".py", ".md", ".json", ".svg"):
+        suffix = fpath.suffix.lower()
+        if suffix in (".py", ".md", ".json") and fpath not in already_bom_lf_checked:
+            raw_bytes = fpath.read_bytes()
+            rel_path = fpath.relative_to(root).as_posix()
+            if raw_bytes.startswith(b"\xef\xbb\xbf"):
+                report.error(f"{rel_path} ne doit pas contenir de BOM UTF-8.")
+            if b"\r\n" in raw_bytes:
+                report.error(f"{rel_path} doit utiliser des fins de ligne LF (CRLF détecté).")
+        if suffix not in (".py", ".md", ".json", ".svg"):
             continue
         content = fpath.read_text(encoding="utf-8", errors="replace")
         for label, rx in PRIVATE_LEAK_RES:
