@@ -1,4 +1,4 @@
-# Gravity Bridge (`v0.3.0`)
+# Gravity Bridge (`v0.3.1`)
 
 Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro dépendance tierce, zéro CLI `agy`, zéro hook permanent) permettant la communication structurée et l'ouverture directe de conversations natives entre projets dans **Antigravity App**, sans jamais déposer de fichiers dans les dépôts suivis.
 
@@ -12,8 +12,8 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro d�
 ## Architecture
 
 - **Contrat module & manifeste (`plugin/`) :** `plugin/plugin.json` (9 champs officiels Antigravity) et `plugin/config/module.json` (`schema_version: 1`, `id: "bridge"`, `storage.subdir: "bridge"`).
-- **Boîte aux lettres centralisée SQLite WAL :** `~/.gemini/gravity/bridge/bridge.db` (résolution `home` > `$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge`). Stocke `workspaces` (avec heartbeat sidecar et `project_id`), `threads` (avec `caller_conversation_id`, `notify_caller`, `callback_dispatched_at`), `messages` et `jobs` (`direction: 'outbound' | 'callback'`) avec verrouillage atomique (`BEGIN IMMEDIATE`) et migration idempotente.
-- **Micro-sidecars natifs Antigravity App (`agentapi`) :** chaque projet cible lié dispose d'un micro-sidecar léger (`~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`) exécutant `scripts/sidecar_relay.py`. Après feu vert humain unique (`approved=True`), le relais crée une vraie conversation dans la barre latérale du projet cible via `agentapi new-conversation` (ou la poursuit via `agentapi send-message`), sans jamais lancer de CLI `agy` isolé ni toucher aux bases internes d'Antigravity.
+- **Boîte aux lettres centralisée SQLite WAL :** `~/.gemini/gravity/bridge/bridge.db` (résolution `home` > `$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge`). Stocke `workspaces` (avec heartbeat sidecar et `project_id`), `threads` (avec `workflow_profile`, `caller_conversation_id`, `notify_caller`, `callback_dispatched_at`), `messages` et `jobs` (`direction: 'outbound' | 'callback'`) avec verrouillage atomique (`BEGIN IMMEDIATE`) et migration idempotente.
+- **Micro-sidecars natifs Antigravity App (`agentapi`) :** chaque projet cible lié dispose d'un micro-sidecar léger (`~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`) exécutant `scripts/sidecar_relay.py`. Après feu vert humain unique (`approved=True`), le relais crée une vraie conversation dans la barre latérale du projet cible via `agentapi new-conversation` (ou la poursuit via `agentapi send-message`), sans jamais lancer de CLI `agy` isolé ni toucher aux bases internes d'Antigravity. Sur un `handoff` doté d'un profil `workflow` actif (`quick|standard|deep|evo`, défaut `standard`), le prompt injecte l'orchestration `/gravity-workflow <profil>`.
 - **Callback retour sécurisé :** si `notify_caller` est activé (explicitement ou en mode *Auto si prêt* lorsque `caller_conversation_id` est fourni et le sidecar appelant est `online`), une réponse cible intermédiaire `reply_thread(..., close=False, dispatch=False)` clôturant un job outbound `dispatched` actif enfile un callback `status=open` (sans poser `callback_dispatched_at`), puis la clôture (`close=True, dispatch=False`) déclenche le callback final *one-shot* `status=done` vers `caller_conversation_id` via `agentapi send-message` (zéro repli `new-conversation`, skip propre `skipped_sidecar_offline`/`skipped_sidecar_unlinked` si le sidecar appelant est indisponible).
 - **Isolation & sécurité :** zéro pollution des dépôts cibles, fail-fast si le sidecar cible est `unlinked`/`offline`, anti-boucle (`depth=1`, `caller_conversation_id`, `GRAVITY_BRIDGE_DEPTH`, exclusion des jobs `callback` de `list_target_conversation_ids()`), plafond 32 Ko UTF-8 par message et filtrage heuristique des secrets (refus en entrée utilisateur, caviardage en sortie relais/log).
 
@@ -36,6 +36,7 @@ Contrat CLI commun (11 drapeaux + options Bridge `--link` / `--unlink`) :
 - `python install.py --plugin-root PATH` *(alias `--source`)* : dossier source du plugin (défaut `./plugin`).
 - `python install.py --skip-validate` *(alias rétrocompatible `--no-validate`)* : ignore la validation pré-installation (hors `--strict`).
 - `python install.py --strict` : impose la validation stricte (outrepasse `--skip-validate` et échoue sur avertissement en `--check`).
+- `python install.py --no-fix-python` : ignore l'adaptation automatique de `"python3"` dans `mcp_config.json` sur la copie installée.
 
 *(Ou via CLI : `agy plugin validate ./plugin --strict` puis `agy plugin install ./plugin`.)*
 

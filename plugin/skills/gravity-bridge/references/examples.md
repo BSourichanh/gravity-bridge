@@ -9,6 +9,7 @@ Avant d'appeler avec `dispatch=true`, présenter à l'utilisateur la cible, le t
   "from_workspace": "gravity-studio",
   "to_workspace": "gravity-bridge",
   "msg_type": "handoff",
+  "workflow": "standard",
   "subject": "Implémenter le lot X",
   "body": "Périmètre, décisions figées et vérifications attendues...",
   "file_refs": ["plugin/core/store.py", "tests/test_store.py"],
@@ -18,9 +19,10 @@ Avant d'appeler avec `dispatch=true`, présenter à l'utilisateur la cible, le t
 }
 ```
 
+- `workflow` omis : résolu à `"standard"` sur `handoff` et `"none"` sur `question`/`info` (`"none"` seul autorisé sur `question`/`info`).
 - `notify_caller` omis : résolu **Auto si prêt** (`true` si `caller_conversation_id` fourni et sidecar appelant `online`, `false` sinon).
 - `dispatch=false` : dépôt passif dans la boîte aux lettres sans ouvrir de conversation App.
-- Si un fil passif existant doit être lancé ensuite : `dispatch_thread(thread_id="thr-...", approved=true, caller_conversation_id="...")`.
+- Si un fil passif existant doit être lancé ensuite : `dispatch_thread(thread_id="thr-...", approved=true, workflow="standard", caller_conversation_id="...")`.
 
 ## 2. Prise en charge cible (`take` & `reply_thread`)
 
@@ -47,7 +49,7 @@ Dans la conversation ouverte côté cible (`depth=1`, `GRAVITY_BRIDGE_DEPTH >= 1
 }
 ```
 4. L'appelant peut alors relancer la conversation cible après arbitrage humain via `reply_thread(..., dispatch=true, approved=true)`.
-5. À la fin du lot, clôturer via `reply_thread(..., close=true, dispatch=false)` pour déclencher le callback final *one-shot* `status=done` :
+5. À la fin du lot, clôturer via `reply_thread(..., close=true, dispatch=false)` avec `file_refs` relatifs (`1..20` entrées max, jamais `> 20`) pour déclencher le callback final *one-shot* `status=done` :
 ```json
 {
   "thread_id": "thr-20261123-abc123",

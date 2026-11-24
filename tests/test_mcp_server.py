@@ -201,6 +201,13 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         for tool in tools:
             self.assertIn("inputSchema", tool)
 
+        by_name = {t["name"]: t for t in tools}
+        for tname in ("send_message", "dispatch_thread"):
+            wf_prop = by_name[tname]["inputSchema"]["properties"].get("workflow")
+            self.assertIsNotNone(wf_prop, f"workflow absent du schéma {tname}")
+            self.assertEqual(wf_prop["type"], "string")
+            self.assertEqual(wf_prop["enum"], ["none", "quick", "standard", "deep", "evo"])
+
         self.assertEqual(by_id[6]["error"]["code"], -32601)
         self.assertEqual(by_id[7]["error"]["code"], -32602)
         parse_errs = [r for r in resps if r.get("id") is None]
@@ -875,6 +882,65 @@ class TestMcpProtocolAndTools(McpStdioTestCase):
         self.assertFalse(relinked["isError"], relinked)
         self.assertEqual(relinked["structuredContent"]["project_id"], sc["project_id"])
         self.assertFalse(relinked["structuredContent"]["bridge_project_created"])
+
+    def test_workflow_profile_send_message_and_dispatch_thread(self) -> None:
+        self._call_tool("register_workspace", {"path": str(self.ws_arch), "slug": "architect"})
+        self._call_tool("register_workspace", {"path": str(self.ws_target), "slug": "metrics"})
+        store = BridgeStore(home=self.home_dir)
+        store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid()
+        )
+
+        # Défaut handoff -> "standard".
+        s_handoff = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "handoff",
+                "subject": "Handoff MCP défaut",
+                "body": "Lot sans workflow explicite.",
+                "dispatch": False,
+            },
+        )
+        self.assertFalse(s_handoff["isError"], s_handoff)
+        tid_h = s_handoff["structuredContent"]["thread_id"]
+        self.assertEqual(s_handoff["structuredContent"]["workflow_profile"], "standard")
+
+        # Rejet profil actif sur question.
+        s_bad_q = self._call_tool(
+            "send_message",
+            {
+                "from_workspace": "architect",
+                "to_workspace": "metrics",
+                "msg_type": "question",
+                "subject": "Question workflow invalide",
+                "body": "Doit échouer.",
+                "workflow": "standard",
+                "dispatch": False,
+            },
+        )
+        self.assertTrue(s_bad_q["isError"])
+        self.assertIn("interdit", s_bad_q["content"][0]["text"])
+
+        # dispatch_thread sans workflow préserve l'existant ("standard").
+        d1 = self._call_tool("dispatch_thread", {"thread_id": tid_h, "approved": True})
+        self.assertFalse(d1["isError"], d1)
+        self.assertEqual(d1["structuredContent"]["workflow_profile"], "standard")
+        self._call_tool(
+            "manage_thread",
+            {"action": "cancel_job", "job_id": d1["structuredContent"]["job"]["id"]},
+        )
+
+        # dispatch_thread avec workflow="evo" met à jour threads.workflow_profile.
+        d2 = self._call_tool(
+            "dispatch_thread",
+            {"thread_id": tid_h, "approved": True, "workflow": "evo"},
+        )
+        self.assertFalse(d2["isError"], d2)
+        self.assertEqual(d2["structuredContent"]["workflow_profile"], "evo")
+        read_h = self._call_tool("read_thread", {"thread_id": tid_h})["structuredContent"]
+        self.assertEqual(read_h["workflow_profile"], "evo")
 
 
 if __name__ == "__main__":

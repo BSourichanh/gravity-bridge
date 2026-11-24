@@ -16,6 +16,8 @@ if str(PLUGIN_ROOT) not in sys.path:
 from core.store import BridgeStore  # noqa: E402
 from scripts.sidecar_relay import (  # noqa: E402
     build_agentapi_command,
+    build_callback_prompt,
+    build_prompt,
     extract_conversation_id,
     process_one_job,
     resolve_agentapi_command,
@@ -444,6 +446,51 @@ class SidecarRelayTestCase(unittest.TestCase):
         self.assertIn("reply_thread(..., dispatch=true)", prompt_sent)
         self.assertNotIn("Fil clôturé", prompt_sent)
         self.assertIsNone(self.store.read_thread(tid, reconcile=False)["callback_dispatched_at"])
+
+    def test_build_prompt_workflow_injection_followup_and_no_leak(self) -> None:
+        base_msg = {"id": 42, "body": "Implémenter le lot.", "file_refs": ["docs/task.md"]}
+        handoff_thread = {
+            "thread_id": "thr-20261124-wf1111",
+            "msg_type": "handoff",
+            "workflow_profile": "deep",
+            "from_workspace": "architect",
+            "to_workspace": "metrics",
+            "subject": "Lot W1",
+            "approved": True,
+        }
+
+        prompt_init = build_prompt(handoff_thread, base_msg, is_followup=False)
+        self.assertTrue(prompt_init.splitlines()[0].startswith("[GRAVITY-BRIDGE | "))
+        self.assertIn("/gravity-workflow deep", prompt_init)
+        self.assertIn("caveman ultra", prompt_init)
+        self.assertIn("last_verified.patch", prompt_init)
+        self.assertIn("file_refs = [\"chemin/relatif\", ...] (1 à 20 max, jamais > 20)", prompt_init)
+        self.assertIn("[START]", prompt_init)
+        self.assertIn("ask_question", prompt_init)
+
+        prompt_followup = build_prompt(handoff_thread, base_msg, is_followup=True)
+        self.assertTrue(prompt_followup.splitlines()[0].startswith("[GRAVITY-BRIDGE | "))
+        self.assertIn("/gravity-workflow deep", prompt_followup)
+        self.assertIn("caveman ultra", prompt_followup)
+        self.assertNotIn("[START]", prompt_followup)
+        self.assertIn("file_refs = [\"chemin/relatif\", ...] (1 à 20 max, jamais > 20)", prompt_followup)
+
+        # Aucune injection pour workflow_profile="none", question, info ni build_callback_prompt.
+        for label, thr in (
+            ("handoff_none", {**handoff_thread, "workflow_profile": "none"}),
+            ("question", {**handoff_thread, "msg_type": "question", "workflow_profile": "deep"}),
+            ("info", {**handoff_thread, "msg_type": "info", "workflow_profile": "standard"}),
+        ):
+            with self.subTest(case=label):
+                p = build_prompt(thr, base_msg, is_followup=False)
+                self.assertTrue(p.splitlines()[0].startswith("[GRAVITY-BRIDGE | "))
+                self.assertNotIn("/gravity-workflow", p)
+                self.assertNotIn("caveman ultra", p)
+                self.assertIn("file_refs = [\"chemin/relatif\", ...] (1 à 20 max, jamais > 20)", p)
+
+        cb_prompt = build_callback_prompt({**handoff_thread, "status": "done"}, base_msg)
+        self.assertNotIn("/gravity-workflow", cb_prompt)
+        self.assertNotIn("caveman ultra", cb_prompt)
 
 
 if __name__ == "__main__":

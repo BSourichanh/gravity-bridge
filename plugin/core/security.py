@@ -27,6 +27,7 @@ ALLOWED_THREAD_MSG_TYPES = ("question", "handoff", "info")
 ALLOWED_ALL_MSG_TYPES = ("question", "handoff", "info", "reply")
 ALLOWED_JOB_ACTIONS = ("new_conversation", "send_message")
 ALLOWED_JOB_DIRECTIONS = ("outbound", "callback")
+ALLOWED_WORKFLOW_PROFILES = ("none", "quick", "standard", "deep", "evo")
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,48}$")
 SIDECAR_ID_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,79}\Z")
@@ -360,6 +361,26 @@ def validate_msg_type(msg_type: str, *, allow_reply: bool = False) -> str:
             f"msg_type invalide ({msg_type!r}). Valeurs autorisées : {', '.join(allowed)}."
         )
     return msg_type
+
+
+def validate_workflow_profile(workflow: Optional[str], *, msg_type: str) -> str:
+    """Valide et normalise le profil gravity-workflow selon msg_type."""
+    if workflow is None:
+        return "standard" if msg_type == "handoff" else "none"
+    if not isinstance(workflow, str):
+        raise ValidationError("workflow doit être une chaîne de caractères.")
+    normalized = workflow.strip().lower()
+    if not normalized:
+        return "standard" if msg_type == "handoff" else "none"
+    if normalized not in ALLOWED_WORKFLOW_PROFILES:
+        raise ValidationError(
+            f"workflow invalide ({workflow!r}). Valeurs autorisées : {', '.join(ALLOWED_WORKFLOW_PROFILES)}."
+        )
+    if msg_type in ("question", "info") and normalized != "none":
+        raise ValidationError(
+            f"workflow={normalized!r} interdit sur msg_type={msg_type!r} (seul 'none' est autorisé)."
+        )
+    return normalized
 
 
 def validate_job_action(action: str) -> str:

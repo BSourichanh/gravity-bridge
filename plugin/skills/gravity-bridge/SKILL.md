@@ -11,11 +11,12 @@ description: >-
 ## Règles strictes
 
 1. **Workspace explicite :** déduire le workspace actif depuis `Active Workspaces` et passer son slug ou chemin absolu (`from_workspace`, `workspace`, `reader_workspace`).
-2. **Feu vert humain unique :** avant `send_message(..., dispatch=true)`, `reply_thread(..., dispatch=true)` ou `dispatch_thread`, présenter cible(s), `msg_type`, posture (`question`/`info` lecture seule, `handoff` exécution encadrée), objet et `file_refs`, puis attendre confirmation avant `approved=true, dispatch=true`. Passer `caller_conversation_id` si connu ; ce feu vert couvre envoi et callbacks (`notify_caller`, *Auto si prêt* si omis avec sidecar appelant `online`, sinon avertissement si `notify_caller=true`).
-3. **Fail-fast sidecar :** si la cible est `unlinked`/`offline`, expliquer la cause et proposer dépôt passif (`dispatch=false`) ou `/gravity-bridge link <slug>`.
-4. **Isolation & plafonds :** stockage centralisé (`$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db`) ; zéro secret ni gros fichier dans `body` (<= 32 Ko UTF-8) ; `file_refs` relatifs (<= 20).
-5. **Anti-boucle & callbacks :** sous `depth >= 1` (`GRAVITY_BRIDGE_DEPTH >= 1`), aucun sous-dispatch ; répondre via `reply_thread(..., dispatch=false, conversation_id=...)`. Si une réponse cible `close=false` clôt un job outbound actif, le serveur enfile un callback intermédiaire `status=open` (sans `callback_dispatched_at`) ; à la clôture (`close=true`), il déclenche le callback final *one-shot* `status=done` si sidecar appelant `online` (sinon `skipped_sidecar_*`).
-6. **Synthèse :** résumés par défaut **<= 12 lignes** Markdown.
+2. **Feu vert humain unique :** avant `dispatch=true` (`send_message`, `reply_thread`, `dispatch_thread`), sauf dispatch autonome `/gravity-architect` post-Planification, présenter cible, `msg_type`, `workflow`, objet et `file_refs`, puis attendre confirmation avant `approved=true, dispatch=true`. Passer `caller_conversation_id` si connu (`notify_caller` *Auto si prêt* si omis, sinon warning si `true`).
+3. **Profil `workflow` (`send_message`, `dispatch_thread`) :** `none|quick|standard|deep|evo` (défaut `standard` sur `handoff`, `none` seul sur `question`/`info`). Sur `handoff` actif, le relais injecte `/gravity-workflow <profil>`.
+4. **Fail-fast sidecar :** si cible `unlinked`/`offline`, proposer dépôt passif (`dispatch=false`) ou `/gravity-bridge link <slug>`.
+5. **Isolation & plafonds :** stockage `$GRAVITY_BRIDGE_HOME` > `$GRAVITY_HOME/bridge` > `~/.gemini/gravity/bridge/bridge.db` ; 0 secret, `body` <= 32 Ko UTF-8, `file_refs` relatifs (`1..20` sur `reply_thread` de retour/clôture, jamais > 20).
+6. **Anti-boucle & callbacks :** sous `depth >= 1`, 0 sous-dispatch ; répondre via `reply_thread(..., dispatch=false, conversation_id=..., file_refs=[...])` (`1..20`). Sur `close=false` clôturant un job outbound actif : callback intermédiaire `status=open` ; sur `close=true` : callback final *one-shot* `status=done` si sidecar appelant `online`.
+7. **Synthèse :** résumés **<= 12 lignes** Markdown.
 
 ## Outils MCP (`gravity-bridge_bridge`) & Routage
 

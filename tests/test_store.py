@@ -243,6 +243,7 @@ class TestSchemaMigrationAndWorkspaces(StoreTestCase):
         self.assertIsNone(detail["caller_conversation_id"])
         self.assertFalse(detail["notify_caller"])
         self.assertIsNone(detail["callback_dispatched_at"])
+        self.assertEqual(detail["workflow_profile"], "none")
         job = store_v020_again.get_job("job-v010", reconcile=False)
         self.assertEqual(job["direction"], "outbound")
 
@@ -943,6 +944,81 @@ class TestJobsAndReconciliation(StoreTestCase):
             self.store.read_thread(t_old["thread_id"])
         self.assertEqual(self.store.read_thread(t_recent["thread_id"])["status"], "done")
         self.assertEqual(self.store.read_thread(t_open["thread_id"])["status"], "open")
+
+    def test_workflow_profile_defaults_read_thread_and_create_job_updates(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.store.record_sidecar_heartbeat(
+            "metrics", sidecar_id="gravity-bridge-metrics", pid=os.getpid(), now=now
+        )
+
+        t_handoff = self.store.create_thread(
+            "architect", "metrics", "handoff", "Handoff défaut", "Body", approved=True
+        )
+        self.assertEqual(t_handoff["workflow_profile"], "standard")
+        self.assertEqual(
+            self.store.read_thread(t_handoff["thread_id"], reconcile=False)["workflow_profile"],
+            "standard",
+        )
+
+        t_question = self.store.create_thread(
+            "architect", "metrics", "question", "Question défaut", "Body", approved=True
+        )
+        self.assertEqual(t_question["workflow_profile"], "none")
+        self.assertEqual(
+            self.store.read_thread(t_question["thread_id"], reconcile=False)["workflow_profile"],
+            "none",
+        )
+
+        with self.assertRaises(ValidationError):
+            self.store.create_thread(
+                "architect",
+                "metrics",
+                "info",
+                "Info invalide",
+                "Body",
+                workflow="deep",
+            )
+
+        # create_job(workflow=None) préserve l'existant.
+        t_deep = self.store.create_thread(
+            "architect",
+            "metrics",
+            "handoff",
+            "Handoff deep",
+            "Body",
+            approved=True,
+            workflow="DEEP",
+        )
+        self.assertEqual(t_deep["workflow_profile"], "deep")
+        j_keep = self.store.create_job(
+            t_deep["thread_id"], t_deep["message_id"], "metrics", workflow=None, now=now
+        )
+        self.assertEqual(
+            self.store.read_thread(t_deep["thread_id"], reconcile=False)["workflow_profile"],
+            "deep",
+        )
+        self.store.cancel_job(j_keep["id"], now=now)
+
+        # create_job(workflow="evo") met à jour workflow_profile dans la transaction.
+        j_upd = self.store.create_job(
+            t_deep["thread_id"], t_deep["message_id"], "metrics", workflow="EVO", now=now
+        )
+        self.assertEqual(
+            self.store.read_thread(t_deep["thread_id"], reconcile=False)["workflow_profile"],
+            "evo",
+        )
+        self.store.cancel_job(j_upd["id"], now=now)
+
+        # create_job(workflow="standard") échoue sur fil question.
+        with self.assertRaises(ValidationError):
+            self.store.create_job(
+                t_question["thread_id"],
+                t_question["message_id"],
+                "metrics",
+                workflow="standard",
+                now=now,
+            )
+        self.assertEqual(self.store.list_jobs(thread_id=t_question["thread_id"], reconcile=False), [])
 
 
 class TestMultiProcessWalConcurrency(StoreTestCase):

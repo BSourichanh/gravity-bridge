@@ -14,7 +14,7 @@ Plugin Antigravity inter-workspaces, 100 % sans dépendance :
 - **Isolation tests :** `TemporaryDirectory` et env temporaires sans toucher `~/.gemini/`.
 
 ## Vérifications obligatoires
-```powershell
+```bash
 python plugin/scripts/validate.py --strict
 agy plugin validate ./plugin --strict
 python -m unittest discover -s tests -p "test_*.py" -v

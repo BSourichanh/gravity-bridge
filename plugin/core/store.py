@@ -40,6 +40,7 @@ from core.security import (
     validate_slug,
     validate_subject,
     validate_wait_seconds,
+    validate_workflow_profile,
 )
 
 _JOBS_TABLE_SQL = """
@@ -83,6 +84,7 @@ CREATE TABLE IF NOT EXISTS threads (
     from_workspace         TEXT NOT NULL REFERENCES workspaces(slug),
     to_workspace           TEXT NOT NULL REFERENCES workspaces(slug),
     msg_type               TEXT NOT NULL CHECK (msg_type IN ('question', 'handoff', 'info')),
+    workflow_profile       TEXT NOT NULL DEFAULT 'none' CHECK (workflow_profile IN ('none', 'quick', 'standard', 'deep', 'evo')),
     subject                TEXT NOT NULL,
     status                 TEXT NOT NULL CHECK (status IN ('open', 'done')) DEFAULT 'open',
     approved               INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1)),
@@ -429,6 +431,7 @@ class BridgeStore:
                 ("caller_conversation_id", "TEXT"),
                 ("notify_caller", "INTEGER NOT NULL DEFAULT 0 CHECK (notify_caller IN (0, 1))"),
                 ("callback_dispatched_at", "TEXT"),
+                ("workflow_profile", "TEXT NOT NULL DEFAULT 'none' CHECK (workflow_profile IN ('none', 'quick', 'standard', 'deep', 'evo'))"),
             ):
                 if col_name not in thread_cols:
                     conn.execute(f"ALTER TABLE threads ADD COLUMN {col_name} {col_type}")
@@ -900,12 +903,14 @@ class BridgeStore:
         approved: bool = False,
         caller_conversation_id: Optional[str] = None,
         notify_caller: Optional[bool] = None,
+        workflow: Optional[str] = None,
         *,
         now: Optional[datetime] = None,
         pid_checker: Optional[Callable[[int], bool]] = None,
     ) -> Dict[str, Any]:
         """Crée un nouveau fil typé et son message initial #1."""
         valid_type = validate_msg_type(msg_type, allow_reply=False)
+        valid_workflow = validate_workflow_profile(workflow, msg_type=valid_type)
         valid_subject = validate_subject(subject)
         valid_body = validate_body(body)
         valid_refs = validate_file_refs(file_refs)
@@ -940,18 +945,19 @@ class BridgeStore:
                 conn.execute(
                     """
                     INSERT INTO threads (
-                        id, from_workspace, to_workspace, msg_type, subject,
+                        id, from_workspace, to_workspace, msg_type, workflow_profile, subject,
                         status, approved, target_conversation_id,
                         caller_conversation_id, notify_caller, callback_dispatched_at,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?, NULL, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL, ?, ?, NULL, ?, ?)
                     """,
                     (
                         thread_id,
                         sender["slug"],
                         recipient["slug"],
                         valid_type,
+                        valid_workflow,
                         valid_subject,
                         approved_int,
                         clean_caller_conv,
@@ -977,6 +983,7 @@ class BridgeStore:
             "from_workspace": sender["slug"],
             "to_workspace": recipient["slug"],
             "msg_type": valid_type,
+            "workflow_profile": valid_workflow,
             "subject": valid_subject,
             "status": "open",
             "approved": bool(approved_int),
@@ -1218,6 +1225,7 @@ class BridgeStore:
             "target_project_id": thread_row["target_project_id"],
             "target_sidecar_status": target_sidecar_status,
             "msg_type": thread_row["msg_type"],
+            "workflow_profile": thread_row["workflow_profile"],
             "subject": thread_row["subject"],
             "status": thread_row["status"],
             "approved": bool(thread_row["approved"]),
@@ -1455,6 +1463,7 @@ class BridgeStore:
         *,
         action: Optional[str] = None,
         model: Optional[str] = None,
+        workflow: Optional[str] = None,
         approve_thread: bool = False,
         require_sidecar_online: bool = True,
         caller_conversation_id: Optional[str] = None,
@@ -1491,14 +1500,24 @@ class BridgeStore:
             with self._transaction(conn, immediate=True):
                 t_row = conn.execute(
                     """
-                    SELECT id, from_workspace, to_workspace, approved, target_conversation_id,
-                           caller_conversation_id, notify_caller
+                    SELECT id, from_workspace, to_workspace, msg_type, workflow_profile,
+                           approved, target_conversation_id, caller_conversation_id, notify_caller
                     FROM threads WHERE id = ?
                     """,
                     (thread_id,),
                 ).fetchone()
                 if t_row is None:
                     raise NotFoundError(f"Fil introuvable : {thread_id!r}.")
+
+                if workflow is not None:
+                    valid_workflow = validate_workflow_profile(
+                        workflow, msg_type=t_row["msg_type"]
+                    )
+                    if valid_workflow != t_row["workflow_profile"]:
+                        conn.execute(
+                            "UPDATE threads SET workflow_profile = ?, updated_at = ? WHERE id = ?",
+                            (valid_workflow, now_iso, thread_id),
+                        )
 
                 m_row = conn.execute(
                     "SELECT id FROM messages WHERE id = ? AND thread_id = ?",

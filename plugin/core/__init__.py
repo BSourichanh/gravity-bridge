@@ -5,6 +5,7 @@ from core.security import (
     ALLOWED_ALL_MSG_TYPES,
     ALLOWED_JOB_ACTIONS,
     ALLOWED_THREAD_MSG_TYPES,
+    ALLOWED_WORKFLOW_PROFILES,
     CLAIM_GRACE_SECONDS,
     CONVERSATION_ID_MAX_CHARS,
     CONVERSATION_ID_MIN_CHARS,
@@ -50,6 +51,7 @@ from core.security import (
     validate_slug,
     validate_subject,
     validate_wait_seconds,
+    validate_workflow_profile,
 )
 from core.sidecar_manager import (
     BRIDGE_PROJECT_SUFFIX,
@@ -82,6 +84,7 @@ __all__ = [
     "ALLOWED_ALL_MSG_TYPES",
     "ALLOWED_JOB_ACTIONS",
     "ALLOWED_THREAD_MSG_TYPES",
+    "ALLOWED_WORKFLOW_PROFILES",
     "BRIDGE_PROJECT_SUFFIX",
     "BridgeError",
     "BridgeStore",
@@ -148,4 +151,5 @@ __all__ = [
     "validate_slug",
     "validate_subject",
     "validate_wait_seconds",
+    "validate_workflow_profile",
 ]

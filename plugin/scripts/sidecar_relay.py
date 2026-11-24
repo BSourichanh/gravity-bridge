@@ -182,9 +182,34 @@ def build_prompt(
             "(AGENTS.md, branche dev, vérifications obligatoires) du dépôt courant."
         )
 
+    lines.append(posture)
+    workflow_profile = str(thread.get("workflow_profile") or "none").strip().lower()
+    if thread.get("msg_type") == "handoff" and workflow_profile in (
+        "quick",
+        "standard",
+        "deep",
+        "evo",
+    ):
+        if not is_followup:
+            lines.extend(
+                [
+                    "",
+                    f"Orchestration autonome (/gravity-workflow {workflow_profile}) :",
+                    f"- Activer `/gravity-workflow {workflow_profile}` (repli gracieux AGENTS.md local si absent).",
+                    "- Lire directement le fichier task référencé dans `file_refs` sans re-résumer avant exécution.",
+                    "- Mode `caveman ultra` ; mini-suivi 1 ligne par jalon : `[START]`, `[PLAN]`, `[BUILD]`, `[REVIEW]`, `[APPLY_DEV]`, `[DONE|BLOCKED]`.",
+                    "- Zéro `ask_question` : si bloqué, appeler `reply_thread(..., close=False, dispatch=False)` avec le motif exact.",
+                    "- Appliquer `last_verified.patch` sur `dev` et re-vérifier `dev` avant `reply_thread(..., close=True)` ; 0 `commit`/`push`/`tag`.",
+                ]
+            )
+        else:
+            lines.append(
+                f"Poursuite workflow : continuer sous `/gravity-workflow {workflow_profile}` "
+                "(mode `caveman ultra`, 0 `ask_question`, 0 `commit`/`push`/`tag`)."
+            )
+
     lines.extend(
         [
-            posture,
             "",
             str(message.get("body") or "").rstrip(),
             "",
@@ -196,6 +221,7 @@ def build_prompt(
             f"  - thread_id = \"{thread['thread_id']}\"",
             f"  - from_workspace = \"{thread['to_workspace']}\"",
             "  - conversation_id = \"<ton Conversation ID si connu>\"",
+            "  - file_refs = [\"chemin/relatif\", ...] (1 à 20 max, jamais > 20)",
             "  - dispatch = false (close = true si le lot handoff est terminé et validé)",
             "  - body concis : 1. Synthèse / Décision, 2. Fichiers modifiés, "
             "3. Résultat exact des vérifications / tests, 4. Points bloquants ou questions.",

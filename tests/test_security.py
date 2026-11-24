@@ -12,6 +12,7 @@ if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
 from core.security import (  # noqa: E402
+    ALLOWED_WORKFLOW_PROFILES,
     MAX_BODY_BYTES,
     MAX_FILE_REF_CHARS,
     MAX_FILE_REFS,
@@ -40,6 +41,7 @@ from core.security import (  # noqa: E402
     validate_slug,
     validate_subject,
     validate_wait_seconds,
+    validate_workflow_profile,
 )
 
 
@@ -271,6 +273,37 @@ class TestPathsSlugsAndPolicy(unittest.TestCase):
         for bad_w in (-1, 31, True, "5"):
             with self.assertRaises(ValidationError):
                 validate_wait_seconds(bad_w)  # type: ignore[arg-type]
+
+    def test_workflow_profile_defaults_normalization_and_msg_type_guards(self) -> None:
+        self.assertEqual(
+            ALLOWED_WORKFLOW_PROFILES, ("none", "quick", "standard", "deep", "evo")
+        )
+        # Défauts selon msg_type (None ou chaîne vide).
+        self.assertEqual(validate_workflow_profile(None, msg_type="handoff"), "standard")
+        self.assertEqual(validate_workflow_profile("   ", msg_type="handoff"), "standard")
+        for non_handoff in ("question", "info"):
+            self.assertEqual(validate_workflow_profile(None, msg_type=non_handoff), "none")
+            self.assertEqual(validate_workflow_profile("", msg_type=non_handoff), "none")
+            self.assertEqual(validate_workflow_profile("  NONE ", msg_type=non_handoff), "none")
+
+        # Normalisation casse + espaces sur handoff.
+        for prof in ("quick", "standard", "deep", "evo", "none"):
+            self.assertEqual(
+                validate_workflow_profile(f"  {prof.upper()} ", msg_type="handoff"), prof
+            )
+
+        # Types et valeurs invalides.
+        for bad_val in (123, True, "ultra", "auto", "fast"):
+            with self.subTest(bad_val=bad_val):
+                with self.assertRaises(ValidationError):
+                    validate_workflow_profile(bad_val, msg_type="handoff")  # type: ignore[arg-type]
+
+        # Profil actif interdit sur question/info.
+        for non_handoff in ("question", "info"):
+            for active in ("quick", "standard", "deep", "evo"):
+                with self.subTest(msg_type=non_handoff, profile=active):
+                    with self.assertRaises(ValidationError):
+                        validate_workflow_profile(active, msg_type=non_handoff)
 
 
 if __name__ == "__main__":

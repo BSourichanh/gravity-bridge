@@ -25,6 +25,7 @@ from core.security import (  # noqa: E402
     validate_model,
     validate_msg_type,
     validate_wait_seconds,
+    validate_workflow_profile,
 )
 from core.sidecar_manager import link_workspace_sidecar  # noqa: E402
 from core.store import BridgeStore, resolve_notify_caller  # noqa: E402
@@ -227,6 +228,14 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "type": "string",
                         "description": "Sélecteur de modèle agentapi optionnel (flash_lite, flash, pro ou model_id).",
                     },
+                    "workflow": {
+                        "type": "string",
+                        "enum": ["none", "quick", "standard", "deep", "evo"],
+                        "description": (
+                            "Profil /gravity-workflow optionnel (défaut 'standard' sur handoff, "
+                            "'none' seul autorisé sur question/info)."
+                        ),
+                    },
                     "caller_conversation_id": {
                         "type": "string",
                         "description": (
@@ -393,6 +402,14 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                         "type": "string",
                         "description": "Sélecteur de modèle agentapi optionnel.",
                     },
+                    "workflow": {
+                        "type": "string",
+                        "enum": ["none", "quick", "standard", "deep", "evo"],
+                        "description": (
+                            "Profil /gravity-workflow optionnel pour mettre à jour le fil avant dispatch "
+                            "(omis = préserve l'existant)."
+                        ),
+                    },
                     "caller_conversation_id": {
                         "type": "string",
                         "description": (
@@ -496,6 +513,8 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
     approved = _as_bool(args.get("approved"), "approved", False)
     dispatch = _as_bool(args.get("dispatch"), "dispatch", False)
     model = validate_model(_optional_str(args, "model"))
+    workflow = _optional_str(args, "workflow")
+    validate_workflow_profile(workflow, msg_type=msg_type)
     caller_conv_id = validate_conversation_id(
         _optional_str(args, "caller_conversation_id"),
         field_name="caller_conversation_id",
@@ -523,6 +542,7 @@ def _handle_send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         approved=approved,
         caller_conversation_id=caller_conv_id,
         notify_caller=notify_caller,
+        workflow=workflow,
     )
     if dispatch:
         job = store.create_job(
@@ -674,6 +694,7 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
     thread_id = _require_str(args, "thread_id").strip()
     approved = _as_bool(args.get("approved"), "approved", False)
     model = validate_model(_optional_str(args, "model"))
+    workflow = _optional_str(args, "workflow")
     caller_conv_id = validate_conversation_id(
         _optional_str(args, "caller_conversation_id"),
         field_name="caller_conversation_id",
@@ -713,6 +734,7 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
         message_id=int(target_msg["id"]),
         target_workspace=thread["to_workspace"],
         model=model,
+        workflow=workflow,
         approve_thread=approved,
         require_sidecar_online=True,
         caller_conversation_id=caller_conv_id,
@@ -721,11 +743,17 @@ def _handle_dispatch_thread(args: Dict[str, Any]) -> Dict[str, Any]:
     )
     if wait_seconds > 0:
         job = store.wait_for_job_dispatch(job["id"], wait_seconds=wait_seconds)
+    effective_workflow = (
+        validate_workflow_profile(workflow, msg_type=thread["msg_type"])
+        if workflow is not None
+        else thread.get("workflow_profile", "none")
+    )
     result: Dict[str, Any] = {
         "thread_id": thread_id,
         "message_id": int(target_msg["id"]),
         "caller_conversation_id": effective_caller,
         "notify_caller": resolved_notify,
+        "workflow_profile": effective_workflow,
         "job": job,
     }
     if warning:

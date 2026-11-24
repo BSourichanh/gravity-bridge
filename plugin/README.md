@@ -14,7 +14,7 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CL
 - `/gravity-bridge` *(défaut)* : enregistre le workspace actif si absent et affiche les sidecars (`online`/`offline`/`unlinked`), messages ouverts/non lus et jobs actifs ou récents.
 - `/gravity-bridge workspaces` : liste les workspaces enregistrés et leur statut sidecar, ou enregistre un nouveau dossier local.
 - `/gravity-bridge link <slug> [chemin]` : génère `~/.gemini/config/sidecars/gravity-bridge-<slug>/sidecar.json`, crée ou met à jour son projet sidecar dédié `<nom> (Bridge)` dans `~/.gemini/config/projects/*.json` (miroir des dossiers/réglages/permissions du projet utilisateur, qui reste intact et toujours visible même vide) et l'active dans `~/.gemini/config/config.json` (`"schemaVersion": 1`).
-- `/gravity-bridge send <cible> [question|handoff|info] <objet>` : compose un brief autonome avec `file_refs` relatifs ; demande un feu vert humain unique avant `dispatch=true` (fail-fast si sidecar cible non `online`) et résout `notify_caller` (*Auto si prêt* ou explicite) pour le callback retour *one-shot*.
+- `/gravity-bridge send <cible> [question|handoff|info] <objet>` : compose un brief autonome avec `file_refs` relatifs et profil `workflow` optionnel (`none|quick|standard|deep|evo`, défaut `standard` sur `handoff`, `none` seul autorisé sur `question`/`info`) ; demande un feu vert humain unique avant `dispatch=true` (fail-fast si sidecar cible non `online`) et résout `notify_caller` (*Auto si prêt* ou explicite) pour le callback retour *one-shot*.
 - `/gravity-bridge read <thread_id>` : affiche le fil complet, les messages, `target_conversation_id`, `target_sidecar_status` et le dernier job.
 - `/gravity-bridge take <thread_id>` : prend en charge un `handoff` depuis le projet cible ; répond via `reply_thread(..., close=False, dispatch=False)` en cas de blocage/question (callback intermédiaire `status=open` si un job outbound actif vient d'être complété) et clôture via `close=True` (callback final *one-shot* `status=done`).
 - `/gravity-bridge reply <thread_id>` : répond au fil (`--close`, ou `--dispatch` pour poursuivre la conversation cible via `agentapi send-message`).
@@ -27,7 +27,7 @@ Plugin Antigravity autonome (**100 % bibliothèque standard Python 3**, zéro CL
 
 ## Installation (`install.py`)
 
-`install.py` suit le contrat CLI commun à 11 drapeaux (`--check` en lecture seule, `--dry-run`, `--force`, `--uninstall`, `--scope {global,workspace}`, `--workspace`, `--target`, `--method {copy,agy}`, `--plugin-root` / `--source`, `--skip-validate` / `--no-validate`, `--strict`) tout en conservant les options de liaison sidecar (`--link`, `--unlink`, `--slug`, `--home`, `--projects-dir`, `--sidecars-dir`, `--source-project-id`, `--project-id`, `--configure-config`, `--no-configure-config`, `--config-path`).
+`install.py` suit le contrat CLI commun à 11 drapeaux (`--check` en lecture seule, `--dry-run`, `--force`, `--uninstall`, `--scope {global,workspace}`, `--workspace`, `--target`, `--method {copy,agy}`, `--plugin-root` / `--source`, `--skip-validate` / `--no-validate`, `--strict`, plus `--no-fix-python`) tout en conservant les options de liaison sidecar (`--link`, `--unlink`, `--slug`, `--home`, `--projects-dir`, `--sidecars-dir`, `--source-project-id`, `--project-id`, `--configure-config`, `--no-configure-config`, `--config-path`).
 
 ## Sécurité & isolation
 

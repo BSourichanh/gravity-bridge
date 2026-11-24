@@ -5,6 +5,16 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et ce pr
 
 ## [Unreleased]
 
+### Added
+- **Lot W1 — Profil `workflow` / `workflow_profile` pour orchestration autonome (`core/security.py`, `core/store.py`, `mcp/server.py`, `scripts/sidecar_relay.py`) :**
+  - Ajout de `ALLOWED_WORKFLOW_PROFILES = ("none", "quick", "standard", "deep", "evo")` et `validate_workflow_profile(workflow, msg_type=...)` (défaut `"standard"` sur `handoff`, `"none"` par défaut et seul autorisé sur `question`/`info`).
+  - Ajout et migration idempotente de `threads.workflow_profile` dans `bridge.db`, prise en charge dans `create_thread`, `read_thread` et `create_job` (`workflow` optionnel sur `send_message` et `dispatch_thread`).
+  - Injection dans `build_prompt()` d'un bloc d'orchestration autonome `/gravity-workflow <profil>` (`caveman ultra`, suivi 1 ligne/jalon, 0 `ask_question`, application `last_verified.patch` sur `dev` avant clôture, 0 `commit`/`push`/`tag`) pour `handoff` actif, rappel court sur relance `is_followup=True`, et mention `file_refs` (`1..20`) dans le contrat de retour (sans toucher `question`/`info`/`none` ni `build_callback_prompt()`).
+
+### Changed
+- **Documentation & contrat dispatch (`rules/AGENTS.md`, `SKILL.md`, `references/examples.md`, `README.md`, `plugin/README.md`, `AGENTS.md`) :**
+  - Autorisation explicite du dispatch autonome `/gravity-architect` post-Planification tout en maintenant `depth >= 1` verrouillé à 0 sous-dispatch, documentation de `workflow` / `file_refs` (`1..20`) et `--no-fix-python`, alignement `v0.3.1` dans `README.md` et bloc `bash` dans `AGENTS.md`.
+
 ## [0.3.1] - 2026-11-24
 
 ### Added
